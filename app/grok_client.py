@@ -30,6 +30,21 @@ _FILE_INSTRUCTION = (
 
 
 def _find_grok_bin() -> Optional[str]:
+    """Return the grok binary to run.
+
+    Prefer the current install (`~/.local/bin/grok`, which links to
+    `~/.grok/bin/grok`) over GROK_BIN. The container default bind-mounts an
+    older download at `/usr/local/bin/grok`, and that path still exists after
+    the CLI has been updated.
+    """
+    home = Path.home()
+    for candidate in (
+        home / ".local" / "bin" / "grok",
+        home / ".grok" / "bin" / "grok",
+    ):
+        if candidate.exists():
+            return str(candidate)
+
     env = os.environ.get("GROK_BIN", "").strip()
     if env and Path(env).exists():
         return env
@@ -37,7 +52,7 @@ def _find_grok_bin() -> Optional[str]:
     if which:
         return which
     for candidate in (
-        Path.home() / ".grok" / "downloads" / "grok-linux-x86_64",
+        home / ".grok" / "downloads" / "grok-linux-x86_64",
         Path("/usr/local/bin/grok"),
     ):
         if candidate.exists():
