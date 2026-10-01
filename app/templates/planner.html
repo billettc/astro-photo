@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Plan session · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="tools-page">
+  <header class="tools-hero">
+    <h1>Night Watch</h1>
+    <p class="lede">Deep-sky session planner — weather, moon, and targets above 20°.</p>
+  </header>
+
+  <div class="panel planner-controls">
+    <div class="planner-fields">
+      <label>Location — city, state
+        <input id="loc" type="text" value="Melrose, MA" placeholder="e.g. Nahant, MA" />
+      </label>
+      <label>Session date
+        <input id="date" type="date" />
+      </label>
+      <label>Start
+        <select id="t0"></select>
+      </label>
+      <label>End
+        <select id="t1"></select>
+      </label>
+      <button type="button" class="btn primary" id="go">Plan session</button>
+    </div>
+    <div class="muted" id="resolved"></div>
+    <div class="alert error hidden" id="err"></div>
+  </div>
+
+  <div id="results" class="hidden">
+    <section class="panel">
+      <h2>The night at a glance <span class="muted" id="strip-sub"></span></h2>
+      <div class="planner-strip" id="stripchart"></div>
+      <div class="planner-legend">
+        <span><i class="sw sw-cloud"></i> cloud cover</span>
+        <span><i class="sw sw-moon"></i> moon altitude</span>
+        <span><i class="sw sw-twi"></i> twilight (sun &gt; −18°)</span>
+      </div>
+    </section>
+
+    <section class="planner-cards">
+      <div class="panel" id="card-sky"></div>
+      <div class="panel" id="card-moon"></div>
+      <div class="panel" id="card-verdict"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Best targets tonight <span class="muted" id="tgt-sub"></span></h2>
+      <div class="target-howto muted">
+        <p><strong>How to read a card:</strong> objects are listed best-first for your session window.</p>
+        <ul>
+          <li><strong>Shoot between</strong> — when it’s high enough in the sky (≥ 20°).</li>
+          <li><strong>Altitude chart</strong> — height above the horizon over time. Hover to see exact degrees at that time. Green shading = above 20°.</li>
+          <li><strong>Brightness / size / Moon</strong> — how bright it looks, how big it is on the sky, and whether the Moon is in the way.</li>
+        </ul>
+      </div>
+      <div id="targets"></div>
+      <p class="muted planner-note">
+        Click any card for a photo and short Wikipedia write-up. Weather via Open-Meteo (~16-day forecast).
+      </p>
+    </section>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/astro-core.js?v=1"></script>
+<script src="/static/js/catalog.js?v=1"></script>
+<script src="/static/js/planner.js?v=5"></script>
+{% endblock %}

@@ -1,0 +1,20 @@
+services:
+  web:
+    build: .
+    container_name: astro-photo
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      APP_NAME: ${APP_NAME:-Astro Photo}
+      DATA_DIR: /data
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      GROK_BIN: ${GROK_BIN:-/usr/local/bin/grok}
+      GROK_MODEL: ${GROK_MODEL:-grok-4.5}
+      GROK_TIMEOUT_S: ${GROK_TIMEOUT_S:-180}
+      GROK_MAX_TURNS: ${GROK_MAX_TURNS:-8}
+    volumes:
+      - ./data:/data

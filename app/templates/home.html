@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{{ settings.home_title or app_name }} · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>{{ settings.home_title or "Photo albums" }}</h1>
+  {% if settings.home_tagline %}
+  <p class="lede">{{ settings.home_tagline }}</p>
+  {% endif %}
+  {% if is_admin %}
+  <div class="row" style="justify-content:center">
+    <a class="btn primary" href="/admin/albums/new">New album</a>
+    <a class="btn ghost" href="/admin/settings">Site settings</a>
+  </div>
+  {% endif %}
+</section>
+
+{% if album_cards %}
+{% if is_admin %}
+<p class="muted reorder-hint" id="album-reorder-status">Drag the grip. The highlighted gap is where the album will land.</p>
+{% endif %}
+<section class="album-grid" id="album-grid"{% if is_admin %} data-reorder="1"{% endif %}>
+  {% for card in album_cards %}
+  <article class="album-card-wrap" data-id="{{ card.album.id }}">
+    <a class="album-card" href="/a/{{ card.album.slug }}">
+      <div class="album-card-cover">
+        {% if card.album.cover_version and card.album.cover_version > 0 %}
+        <img class="cover-baked"
+             src="/cover/{{ card.album.slug }}?v={{ card.album.cover_version }}"
+             alt="{{ card.album.title }}" loading="lazy" />
+        {% elif card.cover %}
+        <img class="cover-framed"
+             src="/media/{{ card.album.slug }}/{{ card.cover.filename }}?v={{ (card.cover.file_version or 0)|int }}"
+             alt="{{ card.album.title }}" loading="lazy"
+             style="--cover-zoom: {{ card.album.cover_zoom or 1 }}; --cover-x: {{ card.album.cover_pan_x or 0 }}; --cover-y: {{ card.album.cover_pan_y or 0 }};" />
+        {% else %}
+        <div class="cover-empty">No photos yet</div>
+        {% endif %}
+        {% if is_admin and not card.album.is_public %}
+        <span class="badge">Private</span>
+        {% endif %}
+        {% if is_admin and card.album.password_hash %}
+        <span class="badge lock">🔒</span>
+        {% endif %}
+      </div>
+      <div class="album-card-meta">
+        <h2>{{ card.album.title }}</h2>
+        <p>{{ card.count }} photo{% if card.count != 1 %}s{% endif %}</p>
+      </div>
+    </a>
+    {% if is_admin %}
+    <div class="album-card-actions">
+      <button type="button" class="reorder-handle" aria-label="Drag to reorder {{ card.album.title }}">
+        <span class="grip" aria-hidden="true"></span>
+      </button>
+      <a class="btn tiny album-card-edit" href="/admin/albums/{{ card.album.id }}">Edit</a>
+    </div>
+    {% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% else %}
+<section class="empty-state">
+  <p>No albums yet.</p>
+  {% if is_admin %}
+  <a class="btn primary" href="/admin/albums/new">Create your first album</a>
+  {% else %}
+  <p class="muted"><a href="/admin/login">Log in</a> to create albums.</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

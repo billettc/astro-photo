@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <meta name="description" content="Share photo albums" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css?v=26" />
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div class="stars" aria-hidden="true"></div>
+  <header class="site-header">
+    <a href="/" class="brand">
+      <span class="brand-mark">✦</span>
+      <span class="brand-name">{{ app_name }}</span>
+    </a>
+    <nav class="nav">
+      <a href="/">Albums</a>
+      <a href="/planner">Plan</a>
+      <a href="/dashboard">Skies</a>
+      {% if is_admin %}
+        <a href="/admin/settings">Settings</a>
+        <a href="/admin/logout" class="muted">Log out</a>
+      {% else %}
+        <a href="/admin/login" class="muted">Admin</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <p>{{ app_name }}{% if settings and settings.footer_text %} · {{ settings.footer_text }}{% endif %}</p>
+  </footer>
+
+  {% block overlay %}{% endblock %}
+
+  <script src="/static/js/app.js?v=27"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

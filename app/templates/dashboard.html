@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Skies · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="tools-page">
+  <header class="tools-hero">
+    <h1>Skies</h1>
+    <p class="lede">Astronomy weather — cloud, seeing, moon, and tonight’s deep-sky picks.</p>
+  </header>
+
+  <div class="panel">
+    <div class="row" style="align-items:flex-end">
+      <label>Location
+        <select id="locSelect"></select>
+      </label>
+      <label>Bortle
+        <input id="bortleInput" type="number" min="1" max="9" step="1" />
+      </label>
+      <button type="button" class="btn ghost" id="addLocBtn">Add location</button>
+      <button type="button" class="btn primary" id="refreshBtn">Refresh</button>
+    </div>
+
+    <div id="locForm" class="stack" hidden style="margin-top:1rem;padding-top:1rem;border-top:1px solid rgba(180,200,255,0.12)">
+      <div class="row" style="align-items:flex-end">
+        <label>Name
+          <input id="locNameInput" type="text" placeholder="Cherry Springs" />
+        </label>
+        <label>City / query
+          <input id="locQueryInput" type="text" placeholder="e.g. Nahant, MA" />
+        </label>
+        <label>Bortle
+          <input id="locBortleNew" type="number" min="1" max="9" step="1" value="4" />
+        </label>
+        <button type="button" class="btn primary" id="saveLocBtn">Save</button>
+        <button type="button" class="btn ghost" id="cancelLocBtn">Cancel</button>
+      </div>
+    </div>
+
+    <div class="alert error" id="weatherAlert" hidden></div>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <div>
+        <h2 id="displayName" style="margin:0">—</h2>
+        <p class="muted" id="displayCoords" style="margin:0.25rem 0 0">—</p>
+      </div>
+      <div style="text-align:right">
+        <div class="muted" style="font-size:0.85rem">Viewing score</div>
+        <div id="overallScore" style="font-family:var(--serif);font-size:2.5rem;line-height:1">—</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.75rem;margin-bottom:1.25rem">
+    <div class="panel" style="margin:0">
+      <div class="muted" style="font-size:0.8rem">Cloud</div>
+      <div id="cardCloud" style="font-size:1.4rem;font-weight:600">—</div>
+    </div>
+    <div class="panel" style="margin:0">
+      <div class="muted" style="font-size:0.8rem">Seeing</div>
+      <div id="cardSeeing" style="font-size:1.4rem;font-weight:600">—</div>
+    </div>
+    <div class="panel" style="margin:0">
+      <div class="muted" style="font-size:0.8rem">Wind</div>
+      <div id="cardWind" style="font-size:1.4rem;font-weight:600">—</div>
+    </div>
+    <div class="panel" style="margin:0">
+      <div class="muted" style="font-size:0.8rem">Humidity</div>
+      <div id="cardHumidity" style="font-size:1.4rem;font-weight:600">—</div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.25rem" class="dash-two">
+    <section class="panel">
+      <h2>Sun</h2>
+      <div class="stack">
+        <div class="row" style="justify-content:space-between"><span class="muted">Sunrise</span><span id="sunriseTime">—</span></div>
+        <div class="row" style="justify-content:space-between"><span class="muted">Sunset</span><span id="sunsetTime">—</span></div>
+        <div class="row" style="justify-content:space-between"><span class="muted">Daylight</span><span id="daylightDuration">—</span></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Moon</h2>
+      <div class="row" style="gap:1.25rem;align-items:center">
+        <canvas id="moonCanvas" width="72" height="72" aria-label="Moon phase"></canvas>
+        <div class="stack" style="flex:1;gap:0.45rem">
+          <div><strong id="moonPhaseName">—</strong> · <span id="moonIllum">—</span> lit</div>
+          <div class="row" style="justify-content:space-between"><span class="muted">Moonrise</span><span id="moonriseTime">—</span></div>
+          <div class="row" style="justify-content:space-between"><span class="muted">Moonset</span><span id="moonsetTime">—</span></div>
+          <div class="row" style="justify-content:space-between"><span class="muted">Peak</span><span id="moonPeak">—</span></div>
+        </div>
+      </div>
+      <p style="margin:1rem 0 0"><span class="muted">Moon-free tonight:</span> <span id="moonFreeWindow">—</span></p>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>Cloud next 24h</h2>
+    <div id="hourlyStrip"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Tonight’s DSO picks</h2>
+    <div id="dsoList"></div>
+    <p class="muted" style="margin-top:0.75rem;font-size:0.85rem">
+      Top seasonal targets for this month, filtered by Bortle. Moon-sensitive objects are penalized when the moon is up and &gt;40% lit.
+    </p>
+  </section>
+</section>
+
+<div id="loadingOverlay" hidden
+  style="position:fixed;inset:0;z-index:50;background:rgba(4,6,12,0.55);display:grid;place-items:center;backdrop-filter:blur(2px)">
+  <div class="panel" style="margin:0">Loading forecast…</div>
+</div>
+<style>
+  #loadingOverlay[hidden] { display: none !important; }
+  @media (max-width: 720px) {
+    .dash-two { grid-template-columns: 1fr !important; }
+  }
+</style>
+{% endblock %}
+{% block scripts %}
+<script src="/static/js/astro-core.js?v=1"></script>
+<script src="/static/js/catalog.js?v=1"></script>
+<script src="/static/js/dashboard.js?v=1"></script>
+{% endblock %}

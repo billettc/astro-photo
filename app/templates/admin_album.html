@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}{{ album.title }} · Admin{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="crumb"><a href="/">Albums</a> / {{ album.title }}</p>
+    <h1>{{ album.title }}</h1>
+    <p class="muted">
+      Share link:
+      <a href="/a/{{ album.slug }}" target="_blank" rel="noopener">/a/{{ album.slug }}</a>
+      <button type="button" class="btn tiny" data-copy="{{ request.base_url }}a/{{ album.slug }}">Copy</button>
+    </p>
+  </div>
+</section>
+
+<section class="two-col">
+  <div class="panel">
+    <h2>Upload photos</h2>
+    <form method="post" action="/admin/albums/{{ album.id }}/upload"
+          enctype="multipart/form-data" class="stack" id="upload-form">
+      <div class="dropzone" id="dropzone" tabindex="0">
+        <p><strong>Drop images here</strong></p>
+        <p class="muted">JPEG, PNG, WebP, GIF · up to 50&nbsp;MB each</p>
+        <label class="btn tiny browse-btn" for="file-input">Browse files…</label>
+        <input type="file" name="files" id="file-input" class="file-input-native"
+               multiple accept="image/*" required />
+        <ul id="file-list" class="file-list"></ul>
+      </div>
+      <button type="submit" class="btn primary" id="upload-btn">Upload</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Album settings</h2>
+    <form method="post" action="/admin/albums/{{ album.id }}/edit" class="stack">
+      <label>
+        Title
+        <input type="text" name="title" value="{{ album.title }}" required maxlength="200" />
+      </label>
+      <label>
+        Description
+        <span class="field-hint">Markdown supported (bold, lists, links, …)</span>
+        <textarea name="description" id="album-description" rows="5"
+                  placeholder="Optional notes for viewers — Markdown OK">{{ album.description or "" }}</textarea>
+      </label>
+      <div class="row desc-ai-row">
+        <button type="button" class="btn tiny" id="generate-description-btn"
+                data-album-id="{{ album.id }}"
+                title="Draft a Markdown description with Grok from the album title and photo names">
+          Generate with Grok
+        </button>
+        <span class="muted" id="generate-description-status" aria-live="polite"></span>
+      </div>
+      <label>
+        Set / change password
+        <input type="password" name="password" autocomplete="new-password" placeholder="Leave blank to keep current" />
+      </label>
+      {% if album.password_hash %}
+      <label class="checkbox">
+        <input type="checkbox" name="clear_password" />
+        Remove password protection
+      </label>
+      {% endif %}
+      <label class="checkbox">
+        <input type="checkbox" name="is_public" {% if album.is_public %}checked{% endif %} />
+        Show on public home page
+      </label>
+      <button type="submit" class="btn">Save settings</button>
+    </form>
+    <form method="post" action="/admin/albums/{{ album.id }}/delete"
+          onsubmit="return confirm('Delete this album and all photos?');" class="danger-zone">
+      <button type="submit" class="btn danger">Delete album</button>
+    </form>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Album thumbnail</h2>
+  {% if photos %}
+  <p class="muted photo-edit-hint">
+    Pick a photo below, then zoom (scroll) and drag <strong>directly on the card</strong> to frame it.
+    Click <strong>Save thumbnail</strong> when it looks right.
+  </p>
+
+  <section class="viewer admin-editor cover-card-editor" id="gallery"
+    data-admin="1"
+    data-editor="cover"
+    data-album-id="{{ album.id }}"
+    data-cover-id="{{ album.cover_photo_id or '' }}"
+    data-cover-zoom="{{ album.cover_zoom or 1.0 }}"
+    data-cover-panx="{{ album.cover_pan_x or 0.0 }}"
+    data-cover-pany="{{ album.cover_pan_y or 0.0 }}"
+    data-cover-version="{{ album.cover_version or 0 }}"
+    data-photos='[{% for p in photos %}{"id":{{ p.id }},"src":"/media/{{ album.slug }}/{{ p.filename }}","thumb":"/media/{{ album.slug }}/{{ p.filename }}?size=thumb","name":{{ p.original_name|tojson }},"zoom":1,"panx":0,"pany":0,"v":{{ (p.file_version or 0)|int }}}{% if not loop.last %},{% endif %}{% endfor %}]'>
+
+    <div class="thumb-strip" id="thumb-strip" role="listbox" aria-label="Album photos">
+      {% for photo in photos %}
+      <button type="button"
+              class="thumb{% if loop.first %} is-active{% endif %}{% if album.cover_photo_id == photo.id %} is-cover{% endif %}"
+              data-index="{{ loop.index0 }}"
+              data-id="{{ photo.id }}"
+              id="photo-{{ photo.id }}"
+              role="option"
+              aria-selected="{{ 'true' if loop.first else 'false' }}"
+              aria-label="{{ photo.original_name }}">
+        <img src="/media/{{ album.slug }}/{{ photo.filename }}?size=thumb&v={{ (photo.file_version or 0)|int }}"
+             alt="" loading="lazy" draggable="false" />
+        {% if album.cover_photo_id == photo.id %}
+        <span class="thumb-cover-badge">Thumb</span>
+        {% endif %}
+      </button>
+      {% endfor %}
+    </div>
+
+    <div class="cover-card-workspace">
+      <div class="album-card cover-preview-card is-interactive">
+        <div class="album-card-cover viewer-frame cover-frame" id="viewer-frame">
+          <img id="viewer-img"
+               src="/media/{{ album.slug }}/{{ cover_photo.filename }}?v={{ (cover_photo.file_version or 0)|int }}"
+               alt="{{ cover_photo.original_name }}"
+               draggable="false" />
+        </div>
+        <div class="album-card-meta">
+          <h2 id="cover-card-title">{{ album.title }}</h2>
+          <p>{{ photos|length }} photo{% if photos|length != 1 %}s{% endif %}</p>
+        </div>
+      </div>
+
+      <div class="viewer-toolbar cover-card-toolbar" id="viewer-toolbar">
+        <button type="button" class="btn tiny" id="zoom-out" aria-label="Zoom out">−</button>
+        <button type="button" class="btn tiny" id="zoom-reset" aria-label="Reset framing">100%</button>
+        <button type="button" class="btn tiny" id="zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" class="btn tiny" id="rotate-left" title="Rotate 90° left">⟲</button>
+        <button type="button" class="btn tiny" id="rotate-right" title="Rotate 90° right">⟳</button>
+        <button type="button" class="btn tiny primary" id="zoom-save">Save thumbnail</button>
+        <form method="post" action="/admin/photos/{{ cover_photo.id }}/delete" id="delete-form" class="inline-form"
+              onsubmit="return confirm('Delete this photo?');">
+          <button type="submit" class="btn tiny danger">Delete photo</button>
+        </form>
+        <span class="muted" id="zoom-save-status" aria-live="polite"></span>
+        <span class="viewer-caption muted" id="viewer-cap">{{ cover_photo.original_name }}</span>
+      </div>
+    </div>
+  </section>
+  {% else %}
+  <p class="muted">No photos yet — upload some above to set a thumbnail.</p>
+  {% endif %}
+</section>
+{% endblock %}

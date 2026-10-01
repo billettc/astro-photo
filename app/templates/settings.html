@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Site settings · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="settings-dialog" role="dialog" aria-labelledby="settings-title">
+  <div class="settings-dialog-card settings-wide">
+    <header class="settings-dialog-head">
+      <h1 id="settings-title">Site settings</h1>
+      <p class="muted">Home page copy, footer, and the Grok prompt used for album descriptions.</p>
+    </header>
+
+    {% if saved %}
+    <div class="alert success">Settings saved.</div>
+    {% endif %}
+
+    <form method="post" action="/admin/settings" class="stack">
+      <label>
+        Site name
+        <span class="field-hint">Header brand and browser tab</span>
+        <input type="text" name="site_name" required maxlength="120"
+               value="{{ settings.site_name or '' }}" />
+      </label>
+      <label>
+        Home title
+        <span class="field-hint">Large heading on the albums page</span>
+        <input type="text" name="home_title" required maxlength="200"
+               value="{{ settings.home_title or '' }}" />
+      </label>
+      <label>
+        Home tagline
+        <span class="field-hint">Line under the title</span>
+        <input type="text" name="home_tagline" maxlength="500"
+               value="{{ settings.home_tagline or '' }}" />
+      </label>
+      <label>
+        Footer text
+        <span class="field-hint">Shown after the site name in the footer</span>
+        <input type="text" name="footer_text" maxlength="200"
+               value="{{ settings.footer_text or '' }}"
+               placeholder="share the night sky" />
+      </label>
+
+      <hr class="settings-divider" />
+
+      <label>
+        Description prompt for Grok
+        <span class="field-hint">
+          Used by <strong>Generate with Grok</strong> on album edit.
+          Placeholders: <code>{title}</code> (album title), <code>{photos}</code> (filename list).
+          Grok may research (e.g. distance/size), then writes <code>description.md</code>; the app loads that file.
+        </span>
+        <textarea name="description_prompt" rows="10" maxlength="8000"
+                  spellcheck="false">{{ settings.description_prompt or '' }}</textarea>
+      </label>
+
+      <div class="row">
+        <button type="submit" class="btn primary">Save settings</button>
+        <a class="btn ghost" href="/">Back to albums</a>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock %}

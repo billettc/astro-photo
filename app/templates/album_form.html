@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}New album · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="auth-card wide">
+  <h1>New album</h1>
+  <form method="post" action="/admin/albums" class="stack">
+    <label>
+      Title
+      <input type="text" name="title" required maxlength="200" placeholder="Andromeda night" />
+    </label>
+    <label>
+      Description
+      <span class="field-hint">Markdown supported</span>
+      <textarea name="description" rows="3" placeholder="Optional notes for viewers — Markdown OK"></textarea>
+    </label>
+    <label>
+      Album password <span class="muted">(optional)</span>
+      <input type="password" name="password" autocomplete="new-password" placeholder="Leave blank for open access" />
+    </label>
+    <label class="checkbox">
+      <input type="checkbox" name="is_public" checked />
+      Show on public home page
+    </label>
+    <div class="row">
+      <button type="submit" class="btn primary">Create album</button>
+      <a class="btn ghost" href="/">Cancel</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

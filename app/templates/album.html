@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}{{ album.title }} · {{ app_name }}{% endblock %}
+{% block content %}
+{% if photos %}
+<section class="viewer album-layout" id="gallery"
+  data-admin="{{ '1' if is_admin else '0' }}"
+  data-album-id="{{ album.id }}"
+  data-photos='[{% for p in photos %}{"id":{{ p.id }},"src":"/media/{{ album.slug }}/{{ p.filename }}","thumb":"/media/{{ album.slug }}/{{ p.filename }}?size=thumb","name":{{ p.original_name|tojson }},"zoom":{{ (p.default_zoom or 1.0)|tojson }},"panx":{{ (p.default_pan_x or 0.0)|tojson }},"pany":{{ (p.default_pan_y or 0.0)|tojson }},"v":{{ (p.file_version or 0)|int }}}{% if not loop.last %},{% endif %}{% endfor %}]'>
+
+  <div class="viewer-stage" id="viewer-stage">
+    <button type="button" class="viewer-nav viewer-prev" id="viewer-prev" aria-label="Previous">‹</button>
+    <div class="viewer-frame" id="viewer-frame">
+      <img id="viewer-img"
+           src="/media/{{ album.slug }}/{{ photos[0].filename }}?v={{ (photos[0].file_version or 0)|int }}"
+           alt="{{ photos[0].original_name }}"
+           draggable="false" />
+    </div>
+    <button type="button" class="viewer-nav viewer-next" id="viewer-next" aria-label="Next">›</button>
+
+    <div class="viewer-toolbar" id="viewer-toolbar">
+      <button type="button" class="btn tiny" id="zoom-out" aria-label="Zoom out">−</button>
+      <button type="button" class="btn tiny" id="zoom-reset" aria-label="Reset zoom">100%</button>
+      <button type="button" class="btn tiny" id="zoom-in" aria-label="Zoom in">+</button>
+      <button type="button" class="btn tiny" id="view-1to1" title="Open full image at 1:1 (actual pixels)">1:1</button>
+      {% if is_admin %}
+      <button type="button" class="btn tiny" id="rotate-left" title="Rotate 90° left (saved to disk)">⟲</button>
+      <button type="button" class="btn tiny" id="rotate-right" title="Rotate 90° right (saved to disk)">⟳</button>
+      <button type="button" class="btn tiny" id="zoom-save" title="Save current zoom and center position for this photo">
+        Save view
+      </button>
+      <span class="muted" id="zoom-save-status" aria-live="polite"></span>
+      {% endif %}
+      <span class="viewer-caption muted" id="viewer-cap">{{ photos[0].original_name }}</span>
+    </div>
+  </div>
+
+
+  <aside class="thumb-rail" aria-label="Album photos">
+    <div class="thumb-strip" id="thumb-strip" role="listbox">
+      {% for photo in photos %}
+      <button type="button"
+              class="thumb{% if loop.first %} is-active{% endif %}"
+              data-index="{{ loop.index0 }}"
+              role="option"
+              aria-selected="{{ 'true' if loop.first else 'false' }}"
+              aria-label="{{ photo.original_name }}"
+              {% if is_admin %}data-id="{{ photo.id }}"{% endif %}>
+        {% if is_admin %}
+        <span class="reorder-handle" title="Drag to reorder" aria-hidden="true">
+          <span class="grip"></span>
+        </span>
+        {% endif %}
+        <img src="/media/{{ album.slug }}/{{ photo.filename }}?size=thumb&v={{ (photo.file_version or 0)|int }}"
+             alt="" loading="lazy" draggable="false" />
+      </button>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <aside class="album-side">
+    <h1 class="album-side-title">{{ album.title }}</h1>
+    {% if album.description %}
+    <div class="album-side-desc md-body">{{ album.description | markdown | safe }}</div>
+    {% endif %}
+    <p class="muted album-side-count">{{ photos|length }} photo{% if photos|length != 1 %}s{% endif %}</p>
+    {% if is_admin %}
+    <p class="muted reorder-status" id="photo-reorder-status">Drag a grip. The highlighted gap is where the photo will land.</p>
+    <p><a class="btn tiny" href="/admin/albums/{{ album.id }}">Edit album</a></p>
+    {% endif %}
+    <p><a class="btn tiny ghost" href="/planner">Plan a session</a></p>
+  </aside>
+</section>
+
+<div id="pixel-dialog" class="pixel-dialog" hidden>
+  <div class="pixel-dialog-bar">
+    <div class="pixel-dialog-meta">
+      <strong id="pixel-dialog-title">1:1</strong>
+      <span class="muted" id="pixel-dialog-size"></span>
+    </div>
+    <div class="pixel-dialog-actions">
+      <button type="button" class="btn tiny" id="pixel-prev" aria-label="Previous">‹</button>
+      <button type="button" class="btn tiny" id="pixel-next" aria-label="Next">›</button>
+      <button type="button" class="btn tiny" id="pixel-close" aria-label="Close">Close</button>
+    </div>
+  </div>
+  <div class="pixel-dialog-scroller" id="pixel-dialog-scroller">
+    <img id="pixel-dialog-img" alt="" draggable="false" />
+  </div>
+  <p class="pixel-dialog-hint muted">Actual size (1 image pixel = 1 screen CSS pixel). Scroll to pan · Esc to close.</p>
+</div>
+{% else %}
+<section class="album-header">
+  <h1>{{ album.title }}</h1>
+  {% if album.description %}
+  <div class="lede md-body">{{ album.description | markdown | safe }}</div>
+  {% endif %}
+  <p class="muted">0 photos</p>
+  {% if is_admin %}
+  <p><a class="btn tiny" href="/admin/albums/{{ album.id }}">Edit album</a></p>
+  {% endif %}
+</section>
+<section class="empty-state">
+  <p>This album has no photos yet.</p>
+</section>
+{% endif %}
+{% endblock %}
