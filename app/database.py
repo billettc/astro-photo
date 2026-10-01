@@ -77,6 +77,8 @@ class Photo(Base):
     default_pan_y = Column(Float, default=0.0)
     # Bumped when the file bytes change (e.g. rotate) so browsers skip stale caches
     file_version = Column(Integer, default=0)
+    # Extracted FITS header JSON ({name, cards}). The FIT image is not stored.
+    fits_header = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
     album = relationship("Album", back_populates="photos")
@@ -176,6 +178,8 @@ def _migrate_sqlite() -> None:
                     "ALTER TABLE photos ADD COLUMN default_pan_y FLOAT NOT NULL DEFAULT 0.0"
                 )
             )
+        if "fits_header" not in photo_cols:
+            conn.execute(text("ALTER TABLE photos ADD COLUMN fits_header TEXT"))
 
         album_cols = {
             row[1]

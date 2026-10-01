@@ -1350,6 +1350,112 @@ body.pixel-dialog-open {
   font-size: 0.9rem;
 }
 
+.photo-capture {
+  margin-top: 1.1rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.photo-capture-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.photo-capture-file {
+  margin: 0 0 0.45rem;
+  font-size: 0.8rem;
+  word-break: break-all;
+}
+
+.photo-capture-file:empty {
+  display: none;
+}
+
+.photo-capture-full {
+  margin-top: 0.65rem;
+}
+
+.photo-capture-full summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.fits-cards {
+  max-height: 280px;
+  overflow: auto;
+  margin-top: 0.55rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.fits-card {
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: 0.1rem 0.65rem;
+  padding: 0.12rem 0;
+}
+
+.fits-key {
+  color: var(--accent);
+}
+
+.fits-val {
+  word-break: break-word;
+}
+
+.fits-cmt {
+  grid-column: 2;
+  color: var(--muted);
+}
+
+.fits-panel {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.fits-panel h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+.fits-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+}
+
+.fits-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.fits-form-row input[type="file"] {
+  font-size: 0.85rem;
+  max-width: 100%;
+  color: var(--muted);
+}
+
+.fits-error {
+  color: var(--danger);
+  margin: 0 0 0.65rem;
+}
+
+.fits-panel .photo-capture {
+  margin-top: 0.9rem;
+}
+
+#fits-clear-form {
+  margin-top: 0.55rem;
+}
+
 .viewer-stage {
   position: relative;
   background: #080a10;

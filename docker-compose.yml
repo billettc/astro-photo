@@ -11,6 +11,7 @@ services:
       APP_NAME: ${APP_NAME:-Astro Photo}
       DATA_DIR: /data
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
+      FIT_MAX_UPLOAD_MB: ${FIT_MAX_UPLOAD_MB:-512}
       XAI_API_KEY: ${XAI_API_KEY:-}
       GROK_BIN: ${GROK_BIN:-/usr/local/bin/grok}
       GROK_MODEL: ${GROK_MODEL:-grok-4.5}

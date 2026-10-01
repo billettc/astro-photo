@@ -19,6 +19,8 @@ SECRET_KEY = _required_env("SECRET_KEY")
 ADMIN_PASSWORD = _required_env("ADMIN_PASSWORD")
 APP_NAME = os.environ.get("APP_NAME", "Astro Photo")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
+# FIT frames are large, but only the header is stored.
+FIT_MAX_UPLOAD_MB = int(os.environ.get("FIT_MAX_UPLOAD_MB", "512"))
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tif", ".tiff"}
 
 # Thumbnail max edge length

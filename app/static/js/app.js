@@ -544,6 +544,98 @@
     applyTransform();
   };
 
+  let fitsById = {};
+  const fitsDataEl = document.getElementById("photo-fits-data");
+  if (fitsDataEl) {
+    try {
+      fitsById = JSON.parse(fitsDataEl.textContent || "{}");
+    } catch {
+      fitsById = {};
+    }
+  }
+
+  const renderFitsInto = (root, payload) => {
+    if (!root) return;
+    const summary = root.querySelector("[data-fits-summary]");
+    const cards = root.querySelector("[data-fits-cards]");
+    const file = root.querySelector("[data-fits-file]");
+    const full = root.querySelector("[data-fits-full]");
+    if (!payload) {
+      root.hidden = true;
+      return;
+    }
+    root.hidden = false;
+    if (file) file.textContent = payload.name || "";
+    if (summary) {
+      summary.replaceChildren();
+      const rows = payload.summary || [];
+      if (!rows.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = "No capture keywords in this header.";
+        summary.appendChild(empty);
+      }
+      rows.forEach((row) => {
+        const line = document.createElement("div");
+        line.className = "kv";
+        const k = document.createElement("span");
+        k.className = "k";
+        k.textContent = row.label || "";
+        const v = document.createElement("span");
+        v.className = "v";
+        v.textContent = row.value || "";
+        line.append(k, v);
+        summary.appendChild(line);
+      });
+    }
+    if (cards) {
+      cards.replaceChildren();
+      (payload.cards || []).forEach((card) => {
+        const line = document.createElement("div");
+        line.className = "fits-card";
+        const k = document.createElement("span");
+        k.className = "fits-key";
+        k.textContent = card.k || "";
+        const v = document.createElement("span");
+        v.className = "fits-val";
+        v.textContent = card.v || "";
+        line.append(k, v);
+        if (card.c) {
+          const c = document.createElement("span");
+          c.className = "fits-cmt";
+          c.textContent = card.c;
+          line.append(c);
+        }
+        cards.appendChild(line);
+      });
+    }
+    if (full) full.hidden = !(payload.cards || []).length;
+  };
+
+  let fitsErrorPinned = true;
+  const renderPhotoFits = (photo) => {
+    const payload = photo ? fitsById[String(photo.id)] : null;
+    renderFitsInto(document.getElementById("photo-capture"), payload || null);
+
+    const panel = document.getElementById("fits-panel");
+    if (!panel || !photo?.id) return;
+    const upload = document.getElementById("fits-upload-form");
+    const clear = document.getElementById("fits-clear-form");
+    if (upload) upload.action = `/admin/photos/${photo.id}/fits`;
+    if (clear) {
+      clear.action = `/admin/photos/${photo.id}/fits/delete`;
+      clear.hidden = !payload;
+    }
+    const name = document.getElementById("fits-photo-name");
+    if (name) name.textContent = photo.name || "this photo";
+    const err = document.getElementById("fits-error");
+    if (err) {
+      err.hidden = !fitsErrorPinned;
+      fitsErrorPinned = false;
+    }
+    renderFitsInto(document.getElementById("fits-preview"), payload || null);
+  };
+
   const syncAdminForms = (photo) => {
     if (!isAdmin || !photo?.id) return;
     const deleteUrl = `/admin/photos/${photo.id}/delete`;
@@ -593,6 +685,7 @@
     img.alt = photo.name || "";
     if (saveStatus) saveStatus.textContent = "";
     syncAdminForms(photo);
+    renderPhotoFits(photo);
 
     thumbs.forEach((t, ti) => {
       const on = ti === index;

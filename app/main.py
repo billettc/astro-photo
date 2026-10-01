@@ -1,6 +1,7 @@
 import secrets
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
 
 from fastapi import (
     Depends,
@@ -30,7 +31,8 @@ from app.auth import (
     require_admin,
     verify_password,
 )
-from app.config import APP_NAME, MAX_UPLOAD_MB, THUMB_DIR, UPLOAD_DIR
+from app.config import APP_NAME, FIT_MAX_UPLOAD_MB, MAX_UPLOAD_MB, THUMB_DIR, UPLOAD_DIR
+from app.fits import FitsError, fits_by_photo, is_fits_filename, load_fits_header, pack_header
 from app.database import (
     DEFAULT_DESCRIPTION_PROMPT,
     Album,
@@ -193,7 +195,12 @@ def view_album(
 
     return templates.TemplateResponse(
         "album.html",
-        _ctx(request, album=album, photos=album.photos),
+        _ctx(
+            request,
+            album=album,
+            photos=album.photos,
+            photo_fits=fits_by_photo(album.photos),
+        ),
     )
 
 
@@ -388,9 +395,18 @@ def admin_album(album_id: int, request: Request, db: Session = Depends(get_db)):
         cover_photo = next((p for p in photos if p.id == album.cover_photo_id), None)
     if not cover_photo and photos:
         cover_photo = photos[0]
+    fits_error = (request.query_params.get("fits_error") or "").strip()[:300]
     return templates.TemplateResponse(
         "admin_album.html",
-        _ctx(request, album=album, photos=photos, cover_photo=cover_photo),
+        _ctx(
+            request,
+            album=album,
+            photos=photos,
+            cover_photo=cover_photo,
+            photo_fits=fits_by_photo(photos),
+            fits_error=fits_error,
+            fit_max_mb=FIT_MAX_UPLOAD_MB,
+        ),
     )
 
 
@@ -535,6 +551,75 @@ async def upload_photos(
     return RedirectResponse(
         f"/admin/albums/{album_id}", status_code=status.HTTP_303_SEE_OTHER
     )
+
+
+def _fits_redirect(album_id: int, photo_id: int, error: str | None = None):
+    if error:
+        location = (
+            f"/admin/albums/{album_id}?fits_error={quote(error)}#photo-{photo_id}"
+        )
+    else:
+        location = f"/admin/albums/{album_id}#photo-{photo_id}"
+    return RedirectResponse(location, status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post(
+    "/admin/photos/{photo_id}/fits",
+    dependencies=[Depends(require_admin)],
+)
+async def upload_fits(
+    photo_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Store the FITS header for one photo. The image payload is discarded."""
+    photo = db.query(Photo).filter(Photo.id == photo_id).first()
+    if not photo:
+        raise HTTPException(404)
+    album_id = photo.album_id
+    name = file.filename or ""
+    if not is_fits_filename(name):
+        return _fits_redirect(
+            album_id, photo.id, "Choose a .fit, .fits, or .fts file."
+        )
+
+    max_bytes = FIT_MAX_UPLOAD_MB * 1024 * 1024
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+    if size <= 0:
+        return _fits_redirect(album_id, photo.id, "That file is empty.")
+    if size > max_bytes:
+        return _fits_redirect(
+            album_id,
+            photo.id,
+            f"That file is larger than {FIT_MAX_UPLOAD_MB} MB.",
+        )
+
+    try:
+        cards = load_fits_header(file.file)
+    except FitsError as exc:
+        return _fits_redirect(album_id, photo.id, str(exc))
+    except Exception:
+        return _fits_redirect(album_id, photo.id, "Could not read that FITS header.")
+
+    photo.fits_header = pack_header(name, cards)
+    db.commit()
+    return _fits_redirect(album_id, photo.id)
+
+
+@app.post(
+    "/admin/photos/{photo_id}/fits/delete",
+    dependencies=[Depends(require_admin)],
+)
+def delete_fits(photo_id: int, db: Session = Depends(get_db)):
+    photo = db.query(Photo).filter(Photo.id == photo_id).first()
+    if not photo:
+        raise HTTPException(404)
+    photo.fits_header = None
+    album_id = photo.album_id
+    db.commit()
+    return _fits_redirect(album_id, photo.id)
 
 
 @app.post(

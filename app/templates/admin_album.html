@@ -141,6 +141,37 @@
         <span class="viewer-caption muted" id="viewer-cap">{{ cover_photo.original_name }}</span>
       </div>
     </div>
+
+    <div class="fits-panel" id="fits-panel">
+      <h3>FIT header</h3>
+      <p class="muted fits-hint">
+        For <strong id="fits-photo-name"></strong>.
+        Upload the matching .fit, .fits, or .fts file
+        (gzip is fine, up to {{ fit_max_mb }}&nbsp;MB).
+        Only the header is stored.
+      </p>
+      {% if fits_error %}
+      <p class="fits-error" id="fits-error" role="alert">{{ fits_error }}</p>
+      {% endif %}
+      <form id="fits-upload-form" method="post" enctype="multipart/form-data" class="fits-form-row"
+            action="/admin/photos/{{ cover_photo.id }}/fits">
+        <input type="file" name="file" accept=".fit,.fits,.fts,.gz" required />
+        <button type="submit" class="btn tiny">Extract header</button>
+      </form>
+      <form id="fits-clear-form" method="post" action="/admin/photos/{{ cover_photo.id }}/fits/delete" hidden
+            onsubmit="return confirm('Remove the FIT header from this photo?');">
+        <button type="submit" class="btn tiny danger">Remove header</button>
+      </form>
+      <div id="fits-preview" class="photo-capture" hidden>
+        <p class="muted photo-capture-file" data-fits-file></p>
+        <div data-fits-summary></div>
+        <details class="photo-capture-full" data-fits-full>
+          <summary>Full header</summary>
+          <div class="fits-cards" data-fits-cards></div>
+        </details>
+      </div>
+    </div>
+    <script type="application/json" id="photo-fits-data">{{ photo_fits | tojson }}</script>
   </section>
   {% else %}
   <p class="muted">No photos yet — upload some above to set a thumbnail.</p>

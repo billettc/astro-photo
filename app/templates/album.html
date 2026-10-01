@@ -63,6 +63,16 @@
     <div class="album-side-desc md-body">{{ album.description | markdown | safe }}</div>
     {% endif %}
     <p class="muted album-side-count">{{ photos|length }} photo{% if photos|length != 1 %}s{% endif %}</p>
+    <div id="photo-capture" class="photo-capture" hidden>
+      <h2 class="photo-capture-title">This frame</h2>
+      <p class="muted photo-capture-file" data-fits-file></p>
+      <div data-fits-summary></div>
+      <details class="photo-capture-full" data-fits-full>
+        <summary>Full header</summary>
+        <div class="fits-cards" data-fits-cards></div>
+      </details>
+    </div>
+    <script type="application/json" id="photo-fits-data">{{ photo_fits | tojson }}</script>
     {% if is_admin %}
     <p class="muted reorder-status" id="photo-reorder-status">Drag a grip. The highlighted gap is where the photo will land.</p>
     <p><a class="btn tiny" href="/admin/albums/{{ album.id }}">Edit album</a></p>
