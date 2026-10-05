@@ -1,9 +1,12 @@
+import logging
 import secrets
+import uuid
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import quote
 
 from fastapi import (
+    BackgroundTasks,
     Depends,
     FastAPI,
     File,
@@ -31,11 +34,35 @@ from app.auth import (
     require_admin,
     verify_password,
 )
-from app.config import APP_NAME, FIT_MAX_UPLOAD_MB, MAX_UPLOAD_MB, THUMB_DIR, UPLOAD_DIR
-from app.fits import FitsError, fits_by_photo, is_fits_filename, load_fits_header, pack_header
+from app.capture import (
+    apply_fits,
+    build_empty_session,
+    build_session,
+    capture_by_photo,
+    finish_solve,
+    session_status_rows,
+    solve_file_for,
+    solve_label,
+    sweep_solve_files,
+)
+from app.config import (
+    APP_NAME,
+    FIT_MAX_UPLOAD_MB,
+    MAX_UPLOAD_MB,
+    SOLVE_DIR,
+    THUMB_DIR,
+    UPLOAD_DIR,
+)
+from app.align import ALIGN_REV, IDENTITY, QUARTER_TURNS, frame_ratio, pick_align, project_stars
+
+log = logging.getLogger(__name__)
+# One refresh at a time per photo. A catalog outage must not pile up.
+_align_refreshing: set[int] = set()
+from app.fits import FitsError, Pointing, SolveError, is_fits_filename, load_fits_header, pack_header
 from app.database import (
     DEFAULT_DESCRIPTION_PROMPT,
     Album,
+    ImagingSession,
     Photo,
     SessionLocal,
     get_db,
@@ -43,6 +70,7 @@ from app.database import (
     init_db,
 )
 from app.grok_client import album_description_prompt, generate_text
+from app.solver import fetch_gaia
 from app.markdown_render import render_markdown
 from app.storage import (
     cover_path,
@@ -66,6 +94,7 @@ app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 def on_startup() -> None:
     ensure_dirs()
     init_db()
+    sweep_solve_files()
 
 
 @app.exception_handler(NotAuthenticated)
@@ -199,9 +228,177 @@ def view_album(
             request,
             album=album,
             photos=album.photos,
-            photo_fits=fits_by_photo(album.photos),
+            photo_fits=capture_by_photo(album.photos),
         ),
     )
+
+
+def _album_is_open(album: Album, request: Request) -> bool:
+    if admin_from_request(request) or not album.password_hash:
+        return True
+    return is_album_unlocked(request.cookies.get(f"album_{album.slug}"), album.slug)
+
+
+def _stored_align(photo: Photo) -> dict | None:
+    """Last crop correction for this file, including one from an older search."""
+    if photo.align_sx is None or photo.align_sy is None:
+        return None
+    if photo.align_tx is None or photo.align_ty is None or photo.align_flip is None:
+        return None
+    if photo.align_version != (photo.file_version or 0):
+        return None
+    return {
+        "sx": photo.align_sx,
+        "sy": photo.align_sy,
+        "tx": photo.align_tx,
+        "ty": photo.align_ty,
+        "flip": int(photo.align_flip),
+        "turn": int(photo.align_turn or 0),
+        "spin": float(photo.align_spin or 0),
+    }
+
+
+def _cached_align(photo: Photo) -> dict | None:
+    if photo.align_rev != ALIGN_REV:
+        return None
+    return _stored_align(photo)
+
+
+def _refresh_align(photo_id: int) -> None:
+    """Replace an older crop correction once the catalog can be reached."""
+    if photo_id in _align_refreshing:
+        return
+    _align_refreshing.add(photo_id)
+    db = SessionLocal()
+    try:
+        photo = db.get(Photo, photo_id)
+        if photo is None or _cached_align(photo) is not None:
+            return
+        payload = frame_align_for_photo(photo)
+        _store_align(photo, bool(payload.get("flip")), payload)
+        db.commit()
+    except HTTPException as exc:
+        log.warning("align refresh skipped for photo %s: %s", photo_id, exc.detail)
+    except Exception:
+        log.exception("align refresh failed for photo %s", photo_id)
+        db.rollback()
+    finally:
+        db.close()
+        _align_refreshing.discard(photo_id)
+
+
+def _store_align(photo: Photo, flip: bool, payload: dict) -> None:
+    photo.align_sx = payload["sx"]
+    photo.align_sy = payload["sy"]
+    photo.align_tx = payload["tx"]
+    photo.align_ty = payload["ty"]
+    photo.align_flip = 1 if flip else 0
+    photo.align_turn = int(payload.get("turn") or 0)
+    photo.align_spin = float(payload.get("spin") or 0)
+    photo.align_version = photo.file_version or 0
+    photo.align_rev = ALIGN_REV
+
+
+def frame_align_for_photo(photo: Photo) -> dict:
+    """Measure how this JPEG is cropped, and which row order matches the stars."""
+    session = photo.capture_session
+    solved = (
+        session
+        and session.solve_status == "solved"
+        and session.center_ra is not None
+        and session.center_dec is not None
+        and session.rotation_deg is not None
+        and session.pixel_scale
+        and session.parity is not None
+        and session.image_width
+        and session.image_height
+    )
+    if not solved:
+        payload = IDENTITY.as_dict()
+        payload["flip"] = 0
+        return payload
+    path = UPLOAD_DIR / photo.album.slug / photo.filename
+    if not path.is_file():
+        raise HTTPException(404, "Photo file is missing.")
+    import numpy as np
+    from PIL import Image
+
+    lum = np.asarray(Image.open(path).convert("L"), dtype=np.float32)
+    hint = Pointing(
+        ra=session.center_ra,
+        dec=session.center_dec,
+        scale=session.pixel_scale,
+        width=int(session.image_width),
+        height=int(session.image_height),
+    )
+    try:
+        # A few dozen bright stars is enough to solve, but a rich field needs
+        # a few hundred before a real crop outscores a chance alignment.
+        catalog = fetch_gaia(hint, limit=200)
+    except SolveError as exc:
+        raise HTTPException(503, "The star catalog could not be reached.") from exc
+    wcs = {
+        "ra": session.center_ra,
+        "dec": session.center_dec,
+        "rotation": session.rotation_deg,
+        "scale": session.pixel_scale,
+        "parity": int(session.parity),
+        "width": int(session.image_width),
+        "height": int(session.image_height),
+    }
+    jpeg_h, jpeg_w = lum.shape
+    fit_w = float(wcs["width"])
+    fit_h = float(wcs["height"])
+    # A landscape JPEG of this portrait sensor is a quarter turn, not a stretch.
+    # Each turn has its own aspect, and the crop search runs on that bitmap.
+    candidates = []
+    for turn in QUARTER_TURNS:
+        ratio = frame_ratio(jpeg_w, jpeg_h, fit_w, fit_h, turn)
+        for flip in (False, True):
+            stars = project_stars(catalog, wcs, jpeg_w, jpeg_h, flip, turn)
+            candidates.append((flip, stars, turn, ratio))
+    flip, found = pick_align(lum, candidates)
+    payload = found.as_dict()
+    payload["flip"] = 1 if flip else 0
+    return payload
+
+
+@app.get("/a/{slug}/photos/{photo_id}/align")
+def photo_align(
+    slug: str,
+    photo_id: int,
+    request: Request,
+    background: BackgroundTasks,
+    flip: int = 0,
+    db: Session = Depends(get_db),
+):
+    album = db.query(Album).filter(Album.slug == slug).first()
+    if not album:
+        raise HTTPException(404, "Album not found")
+    if not _album_is_open(album, request):
+        raise HTTPException(401, "This album is locked.")
+    photo = (
+        db.query(Photo)
+        .filter(Photo.id == photo_id, Photo.album_id == album.id)
+        .first()
+    )
+    if not photo:
+        raise HTTPException(404, "Photo not found")
+    # Older pages send flip. The measurement tries both row orders itself.
+    del flip
+    cached = _cached_align(photo)
+    if cached is not None:
+        return cached
+    # A newer search can wait. Dropping the saved correction draws the marks
+    # on the full frame, which is how Bubble and the M51 recomposition moved.
+    stored = _stored_align(photo)
+    if stored is not None:
+        background.add_task(_refresh_align, photo.id)
+        return stored
+    payload = frame_align_for_photo(photo)
+    _store_align(photo, bool(payload.get("flip")), payload)
+    db.commit()
+    return payload
 
 
 @app.post("/a/{slug}/unlock")
@@ -396,6 +593,7 @@ def admin_album(album_id: int, request: Request, db: Session = Depends(get_db)):
     if not cover_photo and photos:
         cover_photo = photos[0]
     fits_error = (request.query_params.get("fits_error") or "").strip()[:300]
+    upload_error = (request.query_params.get("upload_error") or "").strip()[:300]
     return templates.TemplateResponse(
         "admin_album.html",
         _ctx(
@@ -403,9 +601,11 @@ def admin_album(album_id: int, request: Request, db: Session = Depends(get_db)):
             album=album,
             photos=photos,
             cover_photo=cover_photo,
-            photo_fits=fits_by_photo(photos),
+            photo_fits=capture_by_photo(photos),
             fits_error=fits_error,
+            upload_error=upload_error,
             fit_max_mb=FIT_MAX_UPLOAD_MB,
+            solve_label=solve_label,
         ),
     )
 
@@ -512,16 +712,33 @@ async def reorder_photos(
 async def upload_photos(
     album_id: int,
     files: List[UploadFile] = File(...),
+    session_id: str = Form(""),
     db: Session = Depends(get_db),
 ):
     album = db.query(Album).filter(Album.id == album_id).first()
     if not album:
         raise HTTPException(404)
 
+    chosen = _session_in_album(db, album.id, session_id)
+    if chosen is None:
+        message = "Select an imaging session before uploading photos."
+        if str(session_id or "").strip():
+            message = "That session is not in this album."
+        return RedirectResponse(
+            f"/admin/albums/{album_id}?upload_error={quote(message)}#sessions",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    await _store_photos(db, album, chosen.id, files)
+    db.commit()
+    return RedirectResponse(
+        f"/admin/albums/{album_id}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+async def _store_photos(db: Session, album: Album, session_id: int, files: List[UploadFile]) -> int:
     max_bytes = MAX_UPLOAD_MB * 1024 * 1024
     next_order = max((p.sort_order for p in album.photos), default=-1) + 1
     added = 0
-
     for f in files:
         if not f.filename or not is_allowed_filename(f.filename):
             continue
@@ -534,92 +751,261 @@ async def upload_photos(
             )
         except Exception:
             continue
-        photo = Photo(
-            album_id=album.id,
-            filename=filename,
-            original_name=f.filename,
-            content_type="image/jpeg",
-            width=width,
-            height=height,
-            size_bytes=size_bytes,
-            sort_order=next_order + added,
+        db.add(
+            Photo(
+                album_id=album.id,
+                filename=filename,
+                original_name=f.filename,
+                content_type="image/jpeg",
+                width=width,
+                height=height,
+                size_bytes=size_bytes,
+                sort_order=next_order + added,
+                session_id=session_id,
+            )
         )
-        db.add(photo)
         added += 1
-
-    db.commit()
-    return RedirectResponse(
-        f"/admin/albums/{album_id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return added
 
 
-def _fits_redirect(album_id: int, photo_id: int, error: str | None = None):
+def _session_redirect(album_id: int, error: str | None = None):
     if error:
-        location = (
-            f"/admin/albums/{album_id}?fits_error={quote(error)}#photo-{photo_id}"
-        )
+        location = f"/admin/albums/{album_id}?fits_error={quote(error)}#sessions"
     else:
-        location = f"/admin/albums/{album_id}#photo-{photo_id}"
+        location = f"/admin/albums/{album_id}#sessions"
     return RedirectResponse(location, status_code=status.HTTP_303_SEE_OTHER)
 
 
+def _session_in_album(db: Session, album_id: int, session_id: str) -> ImagingSession | None:
+    if not str(session_id or "").isdigit():
+        return None
+    return (
+        db.query(ImagingSession)
+        .filter(ImagingSession.id == int(session_id), ImagingSession.album_id == album_id)
+        .first()
+    )
+
+
 @app.post(
-    "/admin/photos/{photo_id}/fits",
+    "/admin/albums/{album_id}/sessions",
     dependencies=[Depends(require_admin)],
 )
-async def upload_fits(
-    photo_id: int,
-    file: UploadFile = File(...),
+async def create_session(
+    album_id: int,
+    background: BackgroundTasks,
+    file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
 ):
-    """Store the FITS header for one photo. The image payload is discarded."""
-    photo = db.query(Photo).filter(Photo.id == photo_id).first()
-    if not photo:
+    """Create a session. A FIT file is optional and can be dropped on later."""
+    album = db.query(Album).filter(Album.id == album_id).first()
+    if not album:
         raise HTTPException(404)
-    album_id = photo.album_id
+    if file is None or not (file.filename or "").strip():
+        db.add(build_empty_session(album))
+        db.commit()
+        return _session_redirect(album_id)
+    stored = _accept_fits_upload(album_id, file)
+    if isinstance(stored, RedirectResponse):
+        return stored
+    dest, cards, name = stored
+    session = build_session(album, name, cards, pack_header(name, cards))
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    _queue_solve(background, session, dest)
+    return _session_redirect(album_id)
+
+
+def _accept_fits_upload(album_id: int, file: UploadFile) -> tuple[Path, list, str] | RedirectResponse:
+    """Save an uploaded FIT and return its path, cards, and filename.
+
+    On a bad upload, return a redirect and leave no file behind.
+    """
     name = file.filename or ""
     if not is_fits_filename(name):
-        return _fits_redirect(
-            album_id, photo.id, "Choose a .fit, .fits, or .fts file."
-        )
+        return _session_redirect(album_id, "Choose a .fit, .fits, or .fts file.")
 
     max_bytes = FIT_MAX_UPLOAD_MB * 1024 * 1024
     file.file.seek(0, 2)
     size = file.file.tell()
     file.file.seek(0)
     if size <= 0:
-        return _fits_redirect(album_id, photo.id, "That file is empty.")
+        return _session_redirect(album_id, "That file is empty.")
     if size > max_bytes:
-        return _fits_redirect(
-            album_id,
-            photo.id,
-            f"That file is larger than {FIT_MAX_UPLOAD_MB} MB.",
+        return _session_redirect(
+            album_id, f"That file is larger than {FIT_MAX_UPLOAD_MB} MB."
         )
 
+    SOLVE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = SOLVE_DIR / f"{uuid.uuid4().hex}.fit"
     try:
-        cards = load_fits_header(file.file)
+        with dest.open("wb") as out:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        with dest.open("rb") as stream:
+            cards = load_fits_header(stream)
     except FitsError as exc:
-        return _fits_redirect(album_id, photo.id, str(exc))
+        dest.unlink(missing_ok=True)
+        return _session_redirect(album_id, str(exc))
     except Exception:
-        return _fits_redirect(album_id, photo.id, "Could not read that FITS header.")
+        dest.unlink(missing_ok=True)
+        return _session_redirect(album_id, "Could not read that FITS header.")
+    return dest, cards, name
 
-    photo.fits_header = pack_header(name, cards)
-    db.commit()
-    return _fits_redirect(album_id, photo.id)
+
+def _queue_solve(background: BackgroundTasks, session: ImagingSession, dest: Path) -> None:
+    if session.solve_status == "pending":
+        background.add_task(finish_solve, session.id, str(dest))
+    else:
+        dest.unlink(missing_ok=True)
+
+
+@app.get(
+    "/admin/albums/{album_id}/sessions.json",
+    dependencies=[Depends(require_admin)],
+)
+def session_status(album_id: int, db: Session = Depends(get_db)):
+    album = db.query(Album).filter(Album.id == album_id).first()
+    if not album:
+        raise HTTPException(404)
+    return session_status_rows(album.sessions)
 
 
 @app.post(
-    "/admin/photos/{photo_id}/fits/delete",
+    "/admin/sessions/{session_id}/files",
     dependencies=[Depends(require_admin)],
 )
-def delete_fits(photo_id: int, db: Session = Depends(get_db)):
+async def upload_session_files(
+    session_id: int,
+    background: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    """Add photos to this session. A FIT file updates its header and plate solve."""
+    session = db.query(ImagingSession).filter(ImagingSession.id == session_id).first()
+    if not session:
+        raise HTTPException(404)
+    album_id = session.album_id
+    fits_files = []
+    images = []
+    for item in files:
+        name = item.filename or ""
+        if is_fits_filename(name):
+            fits_files.append(item)
+        elif is_allowed_filename(name):
+            images.append(item)
+    if len(fits_files) > 1:
+        return _session_redirect(album_id, "Drop one FIT file at a time.")
+    if not fits_files and not images:
+        return _session_redirect(album_id, "Drop images or one FIT file.")
+    if fits_files:
+        stored = _accept_fits_upload(album_id, fits_files[0])
+        if isinstance(stored, RedirectResponse):
+            return stored
+        dest, cards, name = stored
+        apply_fits(session, name, cards, pack_header(name, cards))
+        db.commit()
+        _queue_solve(background, session, dest)
+    if images:
+        await _store_photos(db, session.album, session.id, images)
+        db.commit()
+    return _session_redirect(album_id)
+
+
+@app.post(
+    "/admin/sessions/{session_id}/solve",
+    dependencies=[Depends(require_admin)],
+)
+def retry_session_solve(
+    session_id: int,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Plate-solve this session again from the FIT kept after a catalog failure."""
+    session = db.query(ImagingSession).filter(ImagingSession.id == session_id).first()
+    if not session:
+        raise HTTPException(404)
+    path = solve_file_for(session.id)
+    if not path.is_file():
+        return _session_redirect(
+            session.album_id,
+            "Drop the FIT on this session again to plate-solve it.",
+        )
+    session.solve_status = "pending"
+    session.solve_error = None
+    db.commit()
+    background.add_task(finish_solve, session.id, str(path))
+    return _session_redirect(session.album_id)
+
+
+@app.post(
+    "/admin/sessions/{session_id}/fits",
+    dependencies=[Depends(require_admin)],
+)
+async def replace_session_fits(
+    session_id: int,
+    background: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Read a new FIT onto this session and plate-solve it again."""
+    session = db.query(ImagingSession).filter(ImagingSession.id == session_id).first()
+    if not session:
+        raise HTTPException(404)
+    album_id = session.album_id
+    stored = _accept_fits_upload(album_id, file)
+    if isinstance(stored, RedirectResponse):
+        return stored
+    dest, cards, name = stored
+    apply_fits(session, name, cards, pack_header(name, cards))
+    db.commit()
+    _queue_solve(background, session, dest)
+    return _session_redirect(album_id)
+
+
+@app.post(
+    "/admin/sessions/{session_id}/delete",
+    dependencies=[Depends(require_admin)],
+)
+def delete_session(session_id: int, db: Session = Depends(get_db)):
+    session = db.query(ImagingSession).filter(ImagingSession.id == session_id).first()
+    if not session:
+        raise HTTPException(404)
+    album_id = session.album_id
+    for photo in list(session.photos):
+        photo.session_id = None
+    db.delete(session)
+    db.commit()
+    return _session_redirect(album_id)
+
+
+@app.post(
+    "/admin/photos/{photo_id}/session",
+    dependencies=[Depends(require_admin)],
+)
+def assign_photo_session(
+    photo_id: int,
+    session_id: str = Form(""),
+    db: Session = Depends(get_db),
+):
     photo = db.query(Photo).filter(Photo.id == photo_id).first()
     if not photo:
         raise HTTPException(404)
-    photo.fits_header = None
-    album_id = photo.album_id
+    chosen = _session_in_album(db, photo.album_id, session_id)
+    if session_id.strip() and chosen is None:
+        return RedirectResponse(
+            f"/admin/albums/{photo.album_id}?fits_error={quote('That session is not in this album.')}#photo-{photo.id}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    photo.session_id = chosen.id if chosen else None
     db.commit()
-    return _fits_redirect(album_id, photo.id)
+    return RedirectResponse(
+        f"/admin/albums/{photo.album_id}#photo-{photo.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
 
 
 @app.post(

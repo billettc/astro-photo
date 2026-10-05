@@ -55,6 +55,42 @@ class Album(Base):
         cascade="all, delete-orphan",
         order_by="Photo.sort_order, Photo.created_at",
     )
+    sessions = relationship(
+        "ImagingSession",
+        back_populates="album",
+        cascade="all, delete-orphan",
+        order_by="ImagingSession.sort_order, ImagingSession.id",
+    )
+
+
+class ImagingSession(Base):
+    """One field. Created from a FIT file. Photos of that field point here."""
+
+    __tablename__ = "imaging_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    album_id = Column(Integer, ForeignKey("albums.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    source_name = Column(String(255), nullable=False, default="")
+    # Same JSON shape as the old per-photo header: {name, cards}.
+    fits_header = Column(Text, nullable=True)
+    image_width = Column(Integer, default=0)
+    image_height = Column(Integer, default=0)
+    center_ra = Column(Float, nullable=True)
+    center_dec = Column(Float, nullable=True)
+    rotation_deg = Column(Float, nullable=True)
+    pixel_scale = Column(Float, nullable=True)
+    parity = Column(Integer, nullable=True)
+    # pending, solved, or failed
+    solve_status = Column(String(20), nullable=False, default="pending")
+    # header or solver
+    solve_source = Column(String(20), nullable=True)
+    solve_error = Column(String(500), nullable=True)
+    sort_order = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=utcnow)
+
+    album = relationship("Album", back_populates="sessions")
+    photos = relationship("Photo", back_populates="capture_session")
 
 
 class Photo(Base):
@@ -77,11 +113,25 @@ class Photo(Base):
     default_pan_y = Column(Float, default=0.0)
     # Bumped when the file bytes change (e.g. rotate) so browsers skip stale caches
     file_version = Column(Integer, default=0)
-    # Extracted FITS header JSON ({name, cards}). The FIT image is not stored.
+    # Legacy per-photo header. New uploads store the header on ImagingSession.
     fits_header = Column(Text, nullable=True)
+    session_id = Column(Integer, ForeignKey("imaging_sessions.id"), nullable=True, index=True)
+    # Crop of this JPEG relative to the session plate solution. Null until measured.
+    align_sx = Column(Float, nullable=True)
+    align_sy = Column(Float, nullable=True)
+    align_tx = Column(Float, nullable=True)
+    align_ty = Column(Float, nullable=True)
+    align_flip = Column(Integer, nullable=True)
+    # Clockwise quarter turn of the session frame: 0, 90, 180, or 270.
+    align_turn = Column(Integer, nullable=True)
+    # Degrees about the JPEG center after that quarter turn.
+    align_spin = Column(Float, nullable=True)
+    align_version = Column(Integer, nullable=True)
+    align_rev = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
     album = relationship("Album", back_populates="photos")
+    capture_session = relationship("ImagingSession", back_populates="photos")
 
 
 DEFAULT_DESCRIPTION_PROMPT = (
@@ -180,6 +230,26 @@ def _migrate_sqlite() -> None:
             )
         if "fits_header" not in photo_cols:
             conn.execute(text("ALTER TABLE photos ADD COLUMN fits_header TEXT"))
+        if "session_id" not in photo_cols:
+            conn.execute(text("ALTER TABLE photos ADD COLUMN session_id INTEGER"))
+        for name, ddl in (
+            ("align_sx", "FLOAT"),
+            ("align_sy", "FLOAT"),
+            ("align_tx", "FLOAT"),
+            ("align_ty", "FLOAT"),
+            ("align_flip", "INTEGER"),
+            ("align_turn", "INTEGER"),
+            ("align_spin", "FLOAT"),
+            ("align_version", "INTEGER"),
+            ("align_rev", "INTEGER"),
+        ):
+            if name not in photo_cols:
+                conn.execute(text(f"ALTER TABLE photos ADD COLUMN {name} {ddl}"))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_photos_session_id ON photos (session_id)"
+            )
+        )
 
         album_cols = {
             row[1]
@@ -259,6 +329,9 @@ def init_db() -> None:
     db = SessionLocal()
     try:
         get_or_create_settings(db)
+        from app.capture import adopt_legacy_fits
+
+        adopt_legacy_fits(db)
     finally:
         db.close()
 

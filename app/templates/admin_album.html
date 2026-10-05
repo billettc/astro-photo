@@ -13,24 +13,7 @@
   </div>
 </section>
 
-<section class="two-col">
-  <div class="panel">
-    <h2>Upload photos</h2>
-    <form method="post" action="/admin/albums/{{ album.id }}/upload"
-          enctype="multipart/form-data" class="stack" id="upload-form">
-      <div class="dropzone" id="dropzone" tabindex="0">
-        <p><strong>Drop images here</strong></p>
-        <p class="muted">JPEG, PNG, WebP, GIF · up to 50&nbsp;MB each</p>
-        <label class="btn tiny browse-btn" for="file-input">Browse files…</label>
-        <input type="file" name="files" id="file-input" class="file-input-native"
-               multiple accept="image/*" required />
-        <ul id="file-list" class="file-list"></ul>
-      </div>
-      <button type="submit" class="btn primary" id="upload-btn">Upload</button>
-    </form>
-  </div>
-
-  <div class="panel">
+<section class="panel">
     <h2>Album settings</h2>
     <form method="post" action="/admin/albums/{{ album.id }}/edit" class="stack">
       <label>
@@ -71,7 +54,65 @@
           onsubmit="return confirm('Delete this album and all photos?');" class="danger-zone">
       <button type="submit" class="btn danger">Delete album</button>
     </form>
-  </div>
+</section>
+
+<section class="panel" id="sessions" data-album-id="{{ album.id }}">
+  <h2>Imaging sessions</h2>
+  <p class="muted fits-hint">
+    Create a session, then drop photos into it.
+    Drop a FIT file on a session to read its header and plate-solve that field.
+    Gzip is fine, up to {{ fit_max_mb }}&nbsp;MB. The FIT image is used for the solve and is not kept.
+  </p>
+  {% if fits_error %}
+  <p class="fits-error" id="fits-error" role="alert">{{ fits_error }}</p>
+  {% endif %}
+  {% if upload_error %}
+  <p class="fits-error" role="alert">{{ upload_error }}</p>
+  {% endif %}
+  <form method="post" action="/admin/albums/{{ album.id }}/sessions" enctype="multipart/form-data">
+    <button type="submit" class="btn">Create session</button>
+  </form>
+  {% if album.sessions %}
+  <ul class="session-list">
+    {% for session in album.sessions %}
+    <li class="session-row" data-session-id="{{ session.id }}" data-solve-status="{{ session.solve_status }}">
+      <div class="session-head">
+        <strong>{{ session.name }}</strong>
+        <span class="muted">{{ session.photos|length }} photo{% if session.photos|length != 1 %}s{% endif %}</span>
+        <form method="post" action="/admin/sessions/{{ session.id }}/delete" class="inline-form"
+              onsubmit="return confirm('Delete this session? Photos stay in the album.');">
+          <button type="submit" class="btn tiny danger">Delete</button>
+        </form>
+      </div>
+      {% if session.source_name %}
+      <p class="muted photo-capture-file">{{ session.source_name }}</p>
+      {% endif %}
+      <div class="solve-row">
+        <p class="solve-label{% if session.solve_status == 'failed' %} solve-failed{% endif %}" data-solve-label>{{ solve_label(session) }}</p>
+        <form method="post" action="/admin/sessions/{{ session.id }}/solve" class="inline-form session-retry"{% if "star catalog" not in (session.solve_error or "") %} hidden{% endif %}>
+          <button type="submit" class="btn tiny">Try again</button>
+        </form>
+      </div>
+      <form method="post" action="/admin/sessions/{{ session.id }}/files" enctype="multipart/form-data" class="session-drop">
+        <div class="dropzone" tabindex="0">
+          <p><strong>Drop images or a FIT file</strong></p>
+          <p class="muted">JPEG, PNG, WebP, GIF · up to 50&nbsp;MB. One FIT file updates this session.</p>
+          <label class="btn tiny browse-btn">
+            Browse files…
+            <input type="file" name="files" class="file-input-native session-file-input"
+                   multiple accept="image/*,.fit,.fits,.fts,.gz" required
+                   aria-label="Files for {{ session.name }}" />
+          </label>
+          <ul class="file-list"></ul>
+        </div>
+        <button type="submit" class="btn tiny" data-upload-btn>Upload</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">No sessions yet.</p>
+  {% endif %}
 </section>
 
 <section class="panel">
@@ -91,7 +132,7 @@
     data-cover-panx="{{ album.cover_pan_x or 0.0 }}"
     data-cover-pany="{{ album.cover_pan_y or 0.0 }}"
     data-cover-version="{{ album.cover_version or 0 }}"
-    data-photos='[{% for p in photos %}{"id":{{ p.id }},"src":"/media/{{ album.slug }}/{{ p.filename }}","thumb":"/media/{{ album.slug }}/{{ p.filename }}?size=thumb","name":{{ p.original_name|tojson }},"zoom":1,"panx":0,"pany":0,"v":{{ (p.file_version or 0)|int }}}{% if not loop.last %},{% endif %}{% endfor %}]'>
+    data-photos='[{% for p in photos %}{"id":{{ p.id }},"src":"/media/{{ album.slug }}/{{ p.filename }}","thumb":"/media/{{ album.slug }}/{{ p.filename }}?size=thumb","name":{{ p.original_name|tojson }},"zoom":1,"panx":0,"pany":0,"v":{{ (p.file_version or 0)|int }},"session":{{ p.session_id or "null" }}}{% if not loop.last %},{% endif %}{% endfor %}]'>
 
     <div class="thumb-strip" id="thumb-strip" role="listbox" aria-label="Album photos">
       {% for photo in photos %}
@@ -143,27 +184,20 @@
     </div>
 
     <div class="fits-panel" id="fits-panel">
-      <h3>FIT header</h3>
-      <p class="muted fits-hint">
-        For <strong id="fits-photo-name"></strong>.
-        Upload the matching .fit, .fits, or .fts file
-        (gzip is fine, up to {{ fit_max_mb }}&nbsp;MB).
-        Only the header is stored.
-      </p>
-      {% if fits_error %}
-      <p class="fits-error" id="fits-error" role="alert">{{ fits_error }}</p>
-      {% endif %}
-      <form id="fits-upload-form" method="post" enctype="multipart/form-data" class="fits-form-row"
-            action="/admin/photos/{{ cover_photo.id }}/fits">
-        <input type="file" name="file" accept=".fit,.fits,.fts,.gz" required />
-        <button type="submit" class="btn tiny">Extract header</button>
-      </form>
-      <form id="fits-clear-form" method="post" action="/admin/photos/{{ cover_photo.id }}/fits/delete" hidden
-            onsubmit="return confirm('Remove the FIT header from this photo?');">
-        <button type="submit" class="btn tiny danger">Remove header</button>
+      <h3>Session for this photo</h3>
+      <form id="session-assign-form" method="post" action="/admin/photos/{{ cover_photo.id }}/session" class="fits-form-row">
+        <select id="session-assign" name="session_id">
+          <option value="">No session</option>
+          {% for session in album.sessions %}
+          <option value="{{ session.id }}">{{ session.name }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn tiny">Assign</button>
       </form>
       <div id="fits-preview" class="photo-capture" hidden>
+        <h2 class="photo-capture-title" data-session-title>Session</h2>
         <p class="muted photo-capture-file" data-fits-file></p>
+        <div data-solve></div>
         <div data-fits-summary></div>
         <details class="photo-capture-full" data-fits-full>
           <summary>Full header</summary>

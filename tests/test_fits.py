@@ -1,13 +1,24 @@
 import gzip
 import io
+import math
 import unittest
 
 from app.fits import (
+    SolveError,
+    _card_values,
+    _cd_matrix,
+    _tan_pix_to_world,
+    fits_to_display,
     header_for_page,
     is_fits_filename,
     load_fits_header,
     pack_header,
     parse_fits_header,
+    pointing_from_header,
+    radec_to_tan_arcsec,
+    sky_to_fits_pixel,
+    solution_from_header,
+    tan_arcsec_to_radec,
 )
 
 
@@ -40,6 +51,31 @@ def fits_bytes(lines):
         raw.extend(encoded.ljust(80))
     raw.extend(b" " * ((-len(raw)) % 2880))
     return bytes(raw)
+
+
+def solved_header():
+    scale = 2 / 3600
+    lines = [
+        card("SIMPLE", True),
+        card("BITPIX", 16),
+        card("NAXIS", 2),
+        card("NAXIS1", 100),
+        card("NAXIS2", 80),
+        card("OBJECT", "M42"),
+        card("EXPTIME", 300.0),
+        card("CRPIX1", 50.5),
+        card("CRPIX2", 40.5),
+        card("CRVAL1", 83.8),
+        card("CRVAL2", -5.391111),
+        card("CD1_1", -scale),
+        card("CD1_2", 0.0),
+        card("CD2_1", 0.0),
+        card("CD2_2", scale),
+        card("CTYPE1", "RA---TAN"),
+        card("CTYPE2", "DEC--TAN"),
+        "END",
+    ]
+    return lines
 
 
 def sample_header():
@@ -161,6 +197,132 @@ class FitsHeaderTests(unittest.TestCase):
         self.assertTrue(is_fits_filename("frame.fits.gz"))
         self.assertFalse(is_fits_filename("frame.jpg"))
         self.assertFalse(is_fits_filename("frame.fit.txt"))
+
+    def test_header_wcs_is_the_image_center(self):
+        cards = parse_fits_header(io.BytesIO(fits_bytes(solved_header())))
+        solution = solution_from_header(cards)
+        self.assertEqual(solution.source, "header")
+        self.assertAlmostEqual(solution.ra, 83.8, places=4)
+        self.assertAlmostEqual(solution.dec, -5.391111, places=4)
+        self.assertAlmostEqual(solution.scale, 2.0, places=3)
+        self.assertAlmostEqual(solution.rotation, 0.0, places=3)
+        self.assertEqual(solution.parity, -1)
+
+    def test_rotated_wcs(self):
+        scale = 2 / 3600
+        lines = [
+            card("SIMPLE", True),
+            card("BITPIX", 16),
+            card("NAXIS", 2),
+            card("NAXIS1", 10),
+            card("NAXIS2", 10),
+            card("CRPIX1", 5.5),
+            card("CRPIX2", 5.5),
+            card("CRVAL1", 10.0),
+            card("CRVAL2", 20.0),
+            card("CD1_1", 0.0),
+            card("CD1_2", scale),
+            card("CD2_1", scale),
+            card("CD2_2", 0.0),
+            "END",
+        ]
+        solution = solution_from_header(parse_fits_header(io.BytesIO(fits_bytes(lines))))
+        self.assertAlmostEqual(solution.rotation, 90.0, places=3)
+        self.assertAlmostEqual(solution.ra, 10.0, places=4)
+        self.assertAlmostEqual(solution.dec, 20.0, places=4)
+
+    def test_pointing_from_mount_keywords(self):
+        lines = sample_header()
+        lines.insert(-1, card("XPIXSZ", 3.76))
+        cards = parse_fits_header(io.BytesIO(fits_bytes(lines)))
+        hint = pointing_from_header(cards, 100, 80)
+        self.assertAlmostEqual(hint.ra, 83.820833, places=3)
+        self.assertAlmostEqual(hint.dec, -5.391111, places=3)
+        self.assertAlmostEqual(hint.scale, 206.265 * 3.76 * 2 / 550, places=3)
+
+    def test_pointing_requires_a_scale(self):
+        cards = parse_fits_header(io.BytesIO(fits_bytes(sample_header())))
+        with self.assertRaises(SolveError):
+            pointing_from_header(cards, 100, 80)
+
+    def test_tangent_plane_roundtrip(self):
+        ra, dec = tan_arcsec_to_radec(1200, -800, 83.8, -5.4)
+        xi, eta = radec_to_tan_arcsec(ra, dec, 83.8, -5.4)
+        self.assertAlmostEqual(xi, 1200, places=3)
+        self.assertAlmostEqual(eta, -800, places=3)
+
+    def test_sky_pixel_matches_the_header_and_places_north_up(self):
+        cards = parse_fits_header(io.BytesIO(fits_bytes(solved_header())))
+        solution = solution_from_header(cards)
+        cd = _cd_matrix(_card_values(cards))
+        crpix1 = (solution.width + 1) / 2
+        crpix2 = (solution.height + 1) / 2
+        for px, py in ((1, 1), (50.5, 40.5), (100, 80), (12, 70)):
+            ra, dec = _tan_pix_to_world(px, py, crpix1, crpix2, solution.ra, solution.dec, cd)
+            fx, fy = sky_to_fits_pixel(
+                ra,
+                dec,
+                ra0=solution.ra,
+                dec0=solution.dec,
+                rotation_deg=solution.rotation,
+                scale_arcsec=solution.scale,
+                parity=solution.parity,
+                width=solution.width,
+                height=solution.height,
+            )
+            self.assertAlmostEqual(fx, px, places=2)
+            self.assertAlmostEqual(fy, py, places=2)
+
+        north_x, north_y = sky_to_fits_pixel(
+            solution.ra,
+            solution.dec + 20 / 3600,
+            ra0=solution.ra,
+            dec0=solution.dec,
+            rotation_deg=0,
+            scale_arcsec=2,
+            parity=-1,
+            width=100,
+            height=80,
+        )
+        self.assertAlmostEqual(north_x, 50.5, places=2)
+        self.assertGreater(north_y, 40.5)
+        cos_d = math.cos(math.radians(solution.dec))
+        east_x, east_y = sky_to_fits_pixel(
+            solution.ra + (20 / 3600) / cos_d,
+            solution.dec,
+            ra0=solution.ra,
+            dec0=solution.dec,
+            rotation_deg=0,
+            scale_arcsec=2,
+            parity=-1,
+            width=100,
+            height=80,
+        )
+        self.assertLess(east_x, 50.5)
+        self.assertAlmostEqual(east_y, 40.5, places=2)
+
+        center_x, center_y = fits_to_display(50.5, 40.5, 100, 80, 200, 160)
+        self.assertAlmostEqual(center_x, 100)
+        self.assertAlmostEqual(center_y, 80)
+        _, up = fits_to_display(50.5, 50.5, 100, 80, 200, 160)
+        self.assertLess(up, center_y)
+
+    def test_positive_parity_puts_east_to_the_right(self):
+        ra0, dec0 = 30.0, 10.0
+        cos_d = math.cos(math.radians(dec0))
+        east_x, east_y = sky_to_fits_pixel(
+            ra0 + (10 / 3600) / cos_d,
+            dec0,
+            ra0=ra0,
+            dec0=dec0,
+            rotation_deg=0,
+            scale_arcsec=2,
+            parity=1,
+            width=40,
+            height=40,
+        )
+        self.assertAlmostEqual(east_x, 25.5, places=2)
+        self.assertAlmostEqual(east_y, 20.5, places=2)
 
 
 if __name__ == "__main__":

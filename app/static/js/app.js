@@ -9,6 +9,43 @@
   window.addEventListener("drop", cancelFileNav, true);
 
   // Generate album description with Grok
+  const sessionsRoot = document.getElementById("sessions");
+  if (sessionsRoot && sessionsRoot.querySelector("[data-solve-status='pending']")) {
+    const sessionAlbumId = sessionsRoot.dataset.albumId;
+    const pollSessions = async () => {
+      try {
+        const res = await fetch(`/admin/albums/${sessionAlbumId}/sessions.json`, {
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+        });
+        if (!res.ok) return;
+        const rows = await res.json();
+        let still = false;
+        rows.forEach((row) => {
+          const el = sessionsRoot.querySelector(`[data-session-id="${row.id}"]`);
+          if (!el) return;
+          el.dataset.solveStatus = row.status || "";
+          const label = el.querySelector("[data-solve-label]");
+          if (label) {
+            label.textContent = row.label || "";
+            label.classList.toggle("solve-failed", row.status === "failed");
+          }
+          const retry = el.querySelector(".session-retry");
+          if (retry) {
+            retry.hidden = !(
+              row.status === "failed" && (row.label || "").includes("star catalog")
+            );
+          }
+          if (row.status === "pending") still = true;
+        });
+        if (still) setTimeout(pollSessions, 2000);
+      } catch {
+        /* leave the last status on screen */
+      }
+    };
+    setTimeout(pollSessions, 2000);
+  }
+
   const genBtn = document.getElementById("generate-description-btn");
   const genStatus = document.getElementById("generate-description-status");
   const descField = document.getElementById("album-description");
@@ -63,32 +100,37 @@
     });
   });
 
-  // Upload dropzone
-  const input = document.getElementById("file-input");
-  const list = document.getElementById("file-list");
-  const dropzone = document.getElementById("dropzone");
-  const form = document.getElementById("upload-form");
-  const uploadBtn = document.getElementById("upload-btn");
+  // One drop zone per imaging session. Images become photos. A FIT file
+  // updates that session's header and plate solve.
+  const isSessionFile = (file) => {
+    const name = (file.name || "").toLowerCase();
+    if (/\.(fit|fits|fts)(\.gz)?$/.test(name)) return true;
+    if (/\.(jpe?g|png|webp|gif)$/.test(name)) return true;
+    return Boolean(file.type && file.type.startsWith("image/"));
+  };
 
-  if (input && list && dropzone && form) {
+  document.querySelectorAll(".session-drop").forEach((form) => {
+    const input = form.querySelector(".session-file-input");
+    const list = form.querySelector(".file-list");
+    const dropzone = form.querySelector(".dropzone");
+    const uploadBtn = form.querySelector("[data-upload-btn]");
+    if (!input || !list || !dropzone) return;
+
     const render = () => {
       list.innerHTML = "";
-      [...input.files].forEach((f) => {
+      [...input.files].forEach((file) => {
         const li = document.createElement("li");
-        li.textContent = `${f.name} (${Math.round(f.size / 1024)} KB)`;
+        li.textContent = `${file.name} (${Math.round(file.size / 1024)} KB)`;
         list.appendChild(li);
       });
     };
 
     const assignFiles = (fileList) => {
-      const images = [...fileList].filter(
-        (f) => !f.type || f.type.startsWith("image/")
-      );
-      if (!images.length) return false;
+      const accepted = [...fileList].filter(isSessionFile);
+      if (!accepted.length) return false;
       const dt = new DataTransfer();
-      images.forEach((f) => dt.items.add(f));
+      accepted.forEach((file) => dt.items.add(file));
       input.files = dt.files;
-      // native required input is satisfied once files are set
       input.removeAttribute("required");
       render();
       return true;
@@ -96,9 +138,7 @@
 
     input.addEventListener("change", () => {
       render();
-      if (input.files.length) {
-        input.removeAttribute("required");
-      }
+      if (input.files.length) input.removeAttribute("required");
     });
 
     dropzone.addEventListener("dragenter", (e) => {
@@ -111,9 +151,7 @@
       dropzone.classList.add("dragover");
     });
     dropzone.addEventListener("dragleave", (e) => {
-      if (!dropzone.contains(e.relatedTarget)) {
-        dropzone.classList.remove("dragover");
-      }
+      if (!dropzone.contains(e.relatedTarget)) dropzone.classList.remove("dragover");
     });
     dropzone.addEventListener("drop", (e) => {
       e.preventDefault();
@@ -121,15 +159,14 @@
       dropzone.classList.remove("dragover");
       const files = e.dataTransfer && e.dataTransfer.files;
       if (!files || !files.length) return;
-      if (assignFiles(files)) {
-        if (uploadBtn) {
-          uploadBtn.disabled = true;
-          uploadBtn.textContent = "Uploading…";
-        }
-        form.submit();
+      if (!assignFiles(files)) return;
+      if (uploadBtn) {
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = "Uploading…";
       }
+      form.submit();
     });
-  }
+  });
 
   async function postJson(url, body) {
     const res = await fetch(url, {
@@ -424,6 +461,14 @@
   let dragging = false;
   let lastX = 0;
   let lastY = 0;
+  let overlayOn = false;
+  let overlayReady = false;
+  let overlayFlipKey = "";
+  let overlayFlipY = true;
+  let overlayAlign = null;
+  let overlayAlignKey = "";
+  let overlayAlignToken = 0;
+  let updateSkyOverlay = () => {};
 
   const MIN_ZOOM = 1;
   const MAX_ZOOM = 6;
@@ -503,6 +548,7 @@
     img.style.transform = `translate(-50%, -50%) translate(${tx}px, ${ty}px) scale(${s})`;
     frame.classList.toggle("is-zoomed", scale > 1.01);
     if (zoomLabel) zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+    updateSkyOverlay();
   };
 
   const clampPan = () => {
@@ -565,7 +611,42 @@
       return;
     }
     root.hidden = false;
+    const title = root.querySelector("[data-session-title]");
+    if (title) title.textContent = payload.title || "Session";
     if (file) file.textContent = payload.name || "";
+    const solve = root.querySelector("[data-solve]");
+    if (solve) {
+      solve.replaceChildren();
+      const info = payload.solve;
+      if (info) {
+        solve.className = "solve-block";
+        if (info.status === "solved" && info.center) {
+          [
+            ["Center", info.center],
+            ["Rotation", info.rotation],
+            ["Scale", info.scale],
+          ].forEach(([label, value]) => {
+            if (!value) return;
+            const line = document.createElement("div");
+            line.className = "kv";
+            const k = document.createElement("span");
+            k.className = "k";
+            k.textContent = label;
+            const v = document.createElement("span");
+            v.className = "v";
+            v.textContent = value;
+            line.append(k, v);
+            solve.appendChild(line);
+          });
+        } else {
+          const note = document.createElement("p");
+          note.className = info.status === "failed" ? "solve-failed" : "muted";
+          note.textContent =
+            info.status === "pending" ? "Solving…" : info.error || "Plate solve failed.";
+          solve.appendChild(note);
+        }
+      }
+    }
     if (summary) {
       summary.replaceChildren();
       const rows = payload.summary || [];
@@ -612,27 +693,862 @@
     if (full) full.hidden = !(payload.cards || []).length;
   };
 
-  let fitsErrorPinned = true;
+  // Sky marks. The projection matches app/fits.py sky_to_fits_pixel and fits_to_display.
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const overlayBtn = document.getElementById("overlay-toggle");
+  const overlay = document.getElementById("sky-overlay");
+  const overlayDetail = document.getElementById("overlay-detail");
+  const moonEl = document.getElementById("moon-overlay");
+  let overlayDetailKey = "";
+  let moonAnchor = null;
+  const SCALE_STEPS = [
+    [30, "30″"],
+    [60, "1′"],
+    [120, "2′"],
+    [300, "5′"],
+    [600, "10′"],
+    [900, "15′"],
+    [1800, "30′"],
+    [3600, "1°"],
+    [7200, "2°"],
+  ];
+
+  const svgEl = (name, attrs) => {
+    const node = document.createElementNS(SVG_NS, name);
+    Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, String(value)));
+    return node;
+  };
+
+  const photoWcs = (photo) => {
+    const wcs = photo ? fitsById[String(photo.id)]?.solve?.wcs : null;
+    if (!wcs) return null;
+    const width = Number(wcs.width);
+    const height = Number(wcs.height);
+    const pixelScale = Number(wcs.scale);
+    if (!width || !height || !pixelScale) return null;
+    if (!Number.isFinite(Number(wcs.ra)) || !Number.isFinite(Number(wcs.dec))) return null;
+    return {
+      ra: Number(wcs.ra),
+      dec: Number(wcs.dec),
+      rotation: Number(wcs.rotation) || 0,
+      scale: pixelScale,
+      parity: Number(wcs.parity) < 0 ? -1 : 1,
+      width,
+      height,
+      source: fitsById[String(photo.id)]?.solve?.source || "",
+    };
+  };
+
+  const cdParts = (wcs) => {
+    const seconds = wcs.scale / 3600;
+    const theta = (wcs.rotation * Math.PI) / 180;
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+    if (wcs.parity < 0) {
+      return [-seconds * cosT, seconds * sinT, seconds * sinT, seconds * cosT];
+    }
+    return [seconds * cosT, seconds * sinT, -seconds * sinT, seconds * cosT];
+  };
+
+  const tangentToFits = (xiDeg, etaDeg, wcs) => {
+    const [a, b, c, d] = cdParts(wcs);
+    const det = a * d - b * c;
+    if (Math.abs(det) < 1e-20) return null;
+    const dx = (d * xiDeg - b * etaDeg) / det;
+    const dy = (-c * xiDeg + a * etaDeg) / det;
+    return [(wcs.width + 1) / 2 + dx, (wcs.height + 1) / 2 + dy];
+  };
+
+  const skyToFits = (ra, dec, wcs) => {
+    const rad = Math.PI / 180;
+    const raR = ra * rad;
+    const decR = dec * rad;
+    const ra0R = wcs.ra * rad;
+    const dec0R = wcs.dec * rad;
+    const cosC =
+      Math.sin(dec0R) * Math.sin(decR) +
+      Math.cos(dec0R) * Math.cos(decR) * Math.cos(raR - ra0R);
+    if (cosC <= 1e-8) return null;
+    const xi = (Math.cos(decR) * Math.sin(raR - ra0R)) / cosC;
+    const eta =
+      (Math.cos(dec0R) * Math.sin(decR) -
+        Math.sin(dec0R) * Math.cos(decR) * Math.cos(raR - ra0R)) /
+      cosC;
+    const deg = 180 / Math.PI;
+    return tangentToFits(xi * deg, eta * deg, wcs);
+  };
+
+  // Same quarter turns as display_pixel in app/align.py. 0 leaves the file as it is.
+  const overlayTurn = () => {
+    const turn = overlayAlign && Number(overlayAlign.turn);
+    return turn === 90 || turn === 180 || turn === 270 ? turn : 0;
+  };
+
+  const fitsToDisplay = (fitsX, fitsY, wcs, flipY) => {
+    const fileX = fitsX - 0.5;
+    const fileY = flipY ? wcs.height + 0.5 - fitsY : fitsY - 0.5;
+    let x = fileX;
+    let y = fileY;
+    let spanW = wcs.width;
+    let spanH = wcs.height;
+    const turn = overlayTurn();
+    if (turn === 90) {
+      x = spanH - fileY;
+      y = fileX;
+      spanW = wcs.height;
+      spanH = wcs.width;
+    } else if (turn === 180) {
+      x = spanW - fileX;
+      y = spanH - fileY;
+    } else if (turn === 270) {
+      x = fileY;
+      y = spanW - fileX;
+      spanW = wcs.height;
+      spanH = wcs.width;
+    }
+    return [x * (naturalW / spanW), y * (naturalH / spanH)];
+  };
+
+  // A processed photo is often a crop of the FIT. Scale, spin, and shift about the center.
+  const alignDisplay = (x, y) => {
+    if (!overlayAlign || !naturalW || !naturalH) return [x, y];
+    const cx = naturalW / 2;
+    const cy = naturalH / 2;
+    const dx = overlayAlign.sx * (x - cx);
+    const dy = overlayAlign.sy * (y - cy);
+    const spin = Number(overlayAlign.spin) || 0;
+    const ang = (spin * Math.PI) / 180;
+    const turnC = Math.cos(ang);
+    const turnS = Math.sin(ang);
+    return [
+      cx + turnC * dx + turnS * dy + overlayAlign.tx,
+      cy - turnS * dx + turnC * dy + overlayAlign.ty,
+    ];
+  };
+
+  const overlayAlignScale = () =>
+    overlayAlign ? (overlayAlign.sx + overlayAlign.sy) / 2 : 1;
+
+  const displayToFrame = (x, y) => {
+    const drawn = fitRatio * scale;
+    return [
+      frame.clientWidth / 2 + tx + (x - naturalW / 2) * drawn,
+      frame.clientHeight / 2 + ty + (y - naturalH / 2) * drawn,
+    ];
+  };
+
+  const frameToDisplay = (frameX, frameY) => {
+    const drawn = fitRatio * scale;
+    if (!drawn) return [naturalW / 2, naturalH / 2];
+    return [
+      (frameX - frame.clientWidth / 2 - tx) / drawn + naturalW / 2,
+      (frameY - frame.clientHeight / 2 - ty) / drawn + naturalH / 2,
+    ];
+  };
+
+  const overlayArcsecPerPx = (wcs) => {
+    if (!wcs || !naturalW || !fitRatio || !scale) return 0;
+    const fitAlongWidth = overlayTurn() === 90 || overlayTurn() === 270 ? wcs.height : wcs.width;
+    const perPx =
+      (Number(wcs.scale) * (fitAlongWidth / naturalW)) / (fitRatio * scale * overlayAlignScale());
+    return Number.isFinite(perPx) && perPx > 0 ? perPx : 0;
+  };
+
+  const catalogLabel = (obj) => {
+    const name = obj.name || "";
+    if (!name || /^cluster in /i.test(name)) return obj.id || name;
+    return name;
+  };
+
+  const catalogKind = (type) =>
+    ({
+      STAR: "Star",
+      NEB: "Nebula",
+      OC: "Open cluster",
+      GC: "Globular cluster",
+      GAL: "Galaxy",
+      PN: "Planetary nebula",
+      SNR: "Supernova remnant",
+    })[type] || "";
+
+  const detailKey = (obj) => `${obj.id || obj.name || ""}|${obj.ra}|${obj.dec}`;
+
+  const formatRa = (hours) => {
+    const sign = hours < 0 ? "−" : "";
+    const abs = Math.abs(hours);
+    const h = Math.floor(abs);
+    const minutes = (abs - h) * 60;
+    return `${sign}${h}h ${minutes.toFixed(1)}m`;
+  };
+
+  const formatDec = (deg) => {
+    const sign = deg < 0 ? "−" : "+";
+    const abs = Math.abs(deg);
+    const d = Math.floor(abs);
+    const minutes = (abs - d) * 60;
+    return `${sign}${d}° ${minutes.toFixed(1)}′`;
+  };
+
+  // Keep a hundredth when the catalog has one. toFixed(1) turns 2.15 into 2.1.
+  const formatMag = (value) => {
+    const mag = Number(value);
+    const hundredths = Math.round((mag + Number.EPSILON) * 100) / 100;
+    const tenths = Math.round(hundredths * 10) / 10;
+    if (Math.abs(hundredths - tenths) < 0.001) return tenths.toFixed(1);
+    return hundredths.toFixed(2);
+  };
+
+  const closeOverlayDetail = () => {
+    overlayDetailKey = "";
+    if (!overlayDetail) return;
+    overlayDetail.hidden = true;
+    overlayDetail.replaceChildren();
+  };
+
+  // Catalog id plus type, e.g. "NGC 7538 · Nebula". A nickname is kept on its own line.
+  const overlayCopyText = (obj) => {
+    const label = catalogLabel(obj);
+    const kind = catalogKind(obj.type);
+    const official = [obj.id ? String(obj.id) : label, kind].filter(Boolean).join(" · ");
+    if (!label || label === official || official.startsWith(`${label} ·`)) return official || label;
+    return `${label}\n${official}`;
+  };
+
+  const copyOverlayLabel = async (text, selectEl, button) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      button.textContent = "Copied";
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents(selectEl);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      button.textContent = "Selected";
+    }
+    window.setTimeout(() => {
+      if (button.isConnected) button.textContent = "Copy";
+    }, 1200);
+  };
+
+  const showOverlayDetail = (obj) => {
+    if (!overlayDetail) return;
+    const key = detailKey(obj);
+    if (overlayDetailKey === key) {
+      closeOverlayDetail();
+      updateSkyOverlay();
+      return;
+    }
+    overlayDetailKey = key;
+    const label = catalogLabel(obj);
+    const kind = catalogKind(obj.type);
+    const id = obj.id && String(obj.id) !== label ? String(obj.id) : "";
+    const facts = [id, kind].filter(Boolean);
+    const copyText = overlayCopyText(obj);
+    const nameEl = document.createElement("p");
+    nameEl.className = "overlay-detail-name";
+    nameEl.textContent = label;
+    const copyBlock = document.createElement("div");
+    copyBlock.className = "overlay-detail-copy";
+    copyBlock.append(nameEl);
+    if (facts.length) {
+      const meta = document.createElement("p");
+      meta.textContent = facts.join(" · ");
+      copyBlock.append(meta);
+    }
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "btn tiny";
+    copyBtn.textContent = "Copy";
+    copyBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      copyOverlayLabel(copyText, copyBlock, copyBtn);
+    });
+    const head = document.createElement("div");
+    head.className = "overlay-detail-head";
+    head.append(copyBlock, copyBtn);
+    overlayDetail.replaceChildren(head);
+    const where = document.createElement("p");
+    where.textContent = `${formatRa(Number(obj.ra))}    ${formatDec(Number(obj.dec))}`;
+    overlayDetail.append(where);
+    const extra = [];
+    if (obj.size) extra.push(`Size ${obj.size}`);
+    if (obj.mag != null && obj.mag !== "" && Number.isFinite(Number(obj.mag))) {
+      extra.push(`mag ${formatMag(obj.mag)}`);
+    }
+    if (extra.length) {
+      const line = document.createElement("p");
+      line.textContent = extra.join(" · ");
+      overlayDetail.append(line);
+    }
+    const moon = moonSkySize(obj.size);
+    if (moon) {
+      const moonLine = document.createElement("p");
+      moonLine.textContent = moon;
+      overlayDetail.append(moonLine);
+    }
+    overlayDetail.hidden = false;
+    updateSkyOverlay();
+  };
+
+  if (overlayDetail) {
+    overlayDetail.addEventListener("pointerdown", (event) => event.stopPropagation());
+    overlayDetail.addEventListener("dblclick", (event) => event.stopPropagation());
+  }
+
+  const catalogRadiusArcsec = (size) => {
+    if (!size) return 0;
+    const text = String(size);
+    const value = parseFloat(text);
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    let arcsec = value * 60;
+    if (text.includes("°")) arcsec = value * 3600;
+    else if (text.includes("″") || text.includes('"')) arcsec = value;
+    return arcsec / 2;
+  };
+
+  // The full Moon is about 30′ across. Compare the catalog's long axis with that disk.
+  const MOON_DIAMETER_ARCSEC = 30 * 60;
+
+  const moonSkySize = (size) => {
+    const extent = catalogRadiusArcsec(size) * 2;
+    if (!extent) return "";
+    const pct = (extent / MOON_DIAMETER_ARCSEC) * 100;
+    if (pct < 0.5) return "<1% of moon sky size";
+    return `${Math.round(pct)}% of moon sky size`;
+  };
+
+  // Session-only. A new photo starts the disk near the upper right of the frame.
+  const placeMoon = (wcs) => {
+    if (!moonEl) return;
+    const arcsec = overlayArcsecPerPx(wcs);
+    const show = Boolean(overlayOn && wcs && overlayReady && arcsec);
+    if (!show || !frame.clientWidth || !frame.clientHeight) {
+      moonEl.hidden = true;
+      return;
+    }
+    if (!moonAnchor) {
+      const [x, y] = frameToDisplay(frame.clientWidth * 0.72, frame.clientHeight * 0.28);
+      moonAnchor = { x, y };
+    }
+    const diameter = MOON_DIAMETER_ARCSEC / arcsec;
+    const [cx, cy] = displayToFrame(moonAnchor.x, moonAnchor.y);
+    moonEl.hidden = false;
+    moonEl.style.width = `${diameter}px`;
+    moonEl.style.height = `${diameter}px`;
+    moonEl.style.left = `${cx - diameter / 2}px`;
+    moonEl.style.top = `${cy - diameter / 2}px`;
+  };
+
+  if (moonEl) {
+    let moonDrag = null;
+    moonEl.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.stopPropagation();
+      event.preventDefault();
+      const rect = moonEl.getBoundingClientRect();
+      const frameRect = frame.getBoundingClientRect();
+      moonDrag = {
+        dx: event.clientX - (rect.left + rect.width / 2),
+        dy: event.clientY - (rect.top + rect.height / 2),
+        left: frameRect.left,
+        top: frameRect.top,
+      };
+      moonEl.classList.add("is-dragging");
+      moonEl.setPointerCapture(event.pointerId);
+    });
+    moonEl.addEventListener("pointermove", (event) => {
+      if (!moonDrag) return;
+      const [x, y] = frameToDisplay(
+        event.clientX - moonDrag.left - moonDrag.dx,
+        event.clientY - moonDrag.top - moonDrag.dy
+      );
+      moonAnchor = { x, y };
+      placeMoon(photoWcs(photos[index]));
+    });
+    const endMoonDrag = (event) => {
+      if (!moonDrag) return;
+      moonDrag = null;
+      moonEl.classList.remove("is-dragging");
+      try {
+        moonEl.releasePointerCapture(event.pointerId);
+      } catch {
+        /* ignore */
+      }
+    };
+    moonEl.addEventListener("pointerup", endMoonDrag);
+    moonEl.addEventListener("pointercancel", endMoonDrag);
+    moonEl.addEventListener("click", (event) => event.stopPropagation());
+    moonEl.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+    });
+  }
+
+  const overlayObjects = () => {
+    const seen = [];
+    const out = [];
+    const add = (obj) => {
+      const ra = Number(obj && obj.ra);
+      const dec = Number(obj && obj.dec);
+      if (!Number.isFinite(ra) || !Number.isFinite(dec)) return;
+      const idKey = String(obj.id || obj.name || "")
+        .toUpperCase()
+        .replace(/\s+/g, "");
+      if (idKey && seen.some((item) => item.idKey === idKey)) return;
+      const candidate = { ra, dec };
+      if (seen.some((item) => sameSky(item, candidate))) return;
+      seen.push({ idKey, ra, dec });
+      out.push(obj);
+    };
+    (window.ASTRO_CATALOG || []).forEach(add);
+    (window.ASTRO_OVERLAY || []).forEach(add);
+    (window.ASTRO_STARS || []).forEach(add);
+    out.sort((a, b) => (Number(a.mag) || 99) - (Number(b.mag) || 99));
+    return out;
+  };
+
+  const sameSky = (a, b) => {
+    const rad = Math.PI / 180;
+    const dec1 = a.dec * rad;
+    const dec2 = b.dec * rad;
+    const cos =
+      Math.sin(dec1) * Math.sin(dec2) +
+      Math.cos(dec1) * Math.cos(dec2) * Math.cos((a.ra - b.ra) * 15 * rad);
+    return Math.acos(Math.min(1, Math.max(-1, cos))) * (180 / Math.PI) < 0.07;
+  };
+
+  const diskMean = (pixels, sw, sh, sx, sy, radius) => {
+    const r = Math.max(4, Math.min(26, radius));
+    if (sx - r < 0 || sy - r < 0 || sx + r >= sw || sy + r >= sh) return null;
+    let total = 0;
+    let n = 0;
+    const r2 = r * r;
+    const x0 = Math.floor(sx - r);
+    const x1 = Math.ceil(sx + r);
+    const y0 = Math.floor(sy - r);
+    const y1 = Math.ceil(sy + r);
+    for (let y = y0; y <= y1; y += 1) {
+      for (let x = x0; x <= x1; x += 1) {
+        const dx = x + 0.5 - sx;
+        const dy = y + 0.5 - sy;
+        if (dx * dx + dy * dy > r2) continue;
+        const i = (y * sw + x) * 4;
+        total += (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+        n += 1;
+      }
+    }
+    return n ? total / n : null;
+  };
+
+  const voteOverlayFlip = (wcs) => {
+    const choose = window.chooseOverlayFlip;
+    if (typeof choose !== "function" || !img || !naturalW || !naturalH) return null;
+    const sw = 360;
+    const sh = Math.max(1, Math.round((naturalH * sw) / naturalW));
+    const canvas = document.createElement("canvas");
+    canvas.width = sw;
+    canvas.height = sh;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, sw, sh);
+    let pixels;
+    try {
+      pixels = ctx.getImageData(0, 0, sw, sh).data;
+    } catch (err) {
+      return null;
+    }
+    const arcsec = (wcs.scale * (wcs.width / naturalW)) * (naturalW / sw);
+    let flipScore = 0;
+    let plainScore = 0;
+    let count = 0;
+    overlayObjects().forEach((obj) => {
+      const radiusAs = catalogRadiusArcsec(obj.size);
+      if (radiusAs < 90 || radiusAs > 900) return;
+      const fits = skyToFits(Number(obj.ra) * 15, Number(obj.dec), wcs);
+      if (!fits) return;
+      const [fitsX, fitsY] = fits;
+      if (fitsX < 0.5 || fitsY < 0.5 || fitsX > wcs.width + 0.5 || fitsY > wcs.height + 0.5) return;
+      const up = fitsToDisplay(fitsX, fitsY, wcs, true);
+      const plain = fitsToDisplay(fitsX, fitsY, wcs, false);
+      const sampleR = radiusAs / arcsec;
+      const upMean = diskMean(pixels, sw, sh, (up[0] * sw) / naturalW, (up[1] * sh) / naturalH, sampleR);
+      const plainMean = diskMean(
+        pixels,
+        sw,
+        sh,
+        (plain[0] * sw) / naturalW,
+        (plain[1] * sh) / naturalH,
+        sampleR
+      );
+      if (upMean == null || plainMean == null) return;
+      flipScore += upMean;
+      plainScore += plainMean;
+      count += 1;
+    });
+    if (!count) return null;
+    return choose(flipScore, plainScore, count, wcs.source || "");
+  };
+
+  const overlayFlipFor = (photo, wcs) => {
+    const key = `${photo && photo.id}:${photo && photo.v}:${wcs.width}x${wcs.height}`;
+    if (key === overlayFlipKey) return overlayFlipY;
+    const voted = voteOverlayFlip(wcs);
+    overlayFlipY = voted == null ? (wcs.source || "") !== "solver" : voted;
+    overlayFlipKey = key;
+    return overlayFlipY;
+  };
+
+  const formatArc = (arcsec) => {
+    if (arcsec >= 3600) {
+      const degrees = Math.round((arcsec / 3600) * 10) / 10;
+      return `${degrees}°`;
+    }
+    if (arcsec >= 60) {
+      const minutes = Math.round((arcsec / 60) * 10) / 10;
+      return `${minutes}′`;
+    }
+    return `${Math.round(arcsec)}″`;
+  };
+
+  const pickScale = (arcsecPerPx, maxPx) => {
+    let best = null;
+    let bestScore = Infinity;
+    SCALE_STEPS.forEach(([arcsec, label]) => {
+      const px = arcsec / arcsecPerPx;
+      if (px < 40 || px > maxPx) return;
+      const score = Math.abs(Math.log(px / Math.min(110, maxPx)));
+      if (score < bestScore) {
+        best = { arcsec, label, px };
+        bestScore = score;
+      }
+    });
+    if (best) return best;
+    const px = Math.max(40, Math.min(maxPx, SCALE_STEPS[0][0] / arcsecPerPx));
+    return { arcsec: px * arcsecPerPx, label: formatArc(px * arcsecPerPx), px };
+  };
+
+  const paintText = (parent, x, y, text, attrs) => {
+    const node = svgEl("text", {
+      x,
+      y,
+      fill: "#f6d98a",
+      stroke: "#05070d",
+      "stroke-width": 3.5,
+      "paint-order": "stroke",
+      "font-size": 13,
+      "font-family": "DM Sans, sans-serif",
+      ...attrs,
+    });
+    node.textContent = text;
+    parent.appendChild(node);
+  };
+
+  const drawSkyOverlay = (wcs, flipY) => {
+    const fw = frame.clientWidth;
+    const fh = frame.clientHeight;
+    overlay.replaceChildren();
+    overlay.setAttribute("viewBox", `0 0 ${fw} ${fh}`);
+    if (!fw || !fh || !naturalW || !naturalH || !fitRatio) return;
+
+    const arcsecPerPx = overlayArcsecPerPx(wcs);
+    const drawn = fitRatio * scale;
+    const photoLeft = fw / 2 + tx - (naturalW / 2) * drawn;
+    const photoRight = photoLeft + naturalW * drawn;
+    const objects = svgEl("g", { id: "sky-objects" });
+    const placed = [];
+    const catalog = overlayObjects();
+    catalog.forEach((obj) => {
+      const ra = Number(obj.ra) * 15;
+      const dec = Number(obj.dec);
+      if (!Number.isFinite(ra) || !Number.isFinite(dec)) return;
+      const fits = skyToFits(ra, dec, wcs);
+      if (!fits) return;
+      const [fitsX, fitsY] = fits;
+      if (fitsX < 0.5 || fitsY < 0.5 || fitsX > wcs.width + 0.5 || fitsY > wcs.height + 0.5) return;
+      const [jpegX, jpegY] = alignDisplay(...fitsToDisplay(fitsX, fitsY, wcs, flipY));
+      const [cx, cy] = displayToFrame(jpegX, jpegY);
+      const radiusArcsec = catalogRadiusArcsec(obj.size);
+      const rawRadius = radiusArcsec > 0 ? radiusArcsec / arcsecPerPx : 8;
+      const cap = Math.min(fw, fh) * 0.22;
+      // A circle bigger than the view would look like the object's real size. Mark the center instead.
+      const radius = rawRadius > cap ? 11 : Math.max(6, rawRadius);
+      const label = catalogLabel(obj);
+      const mark = svgEl("g", {
+        class: detailKey(obj) === overlayDetailKey ? "sky-mark is-open" : "sky-mark",
+      });
+      if (label) mark.setAttribute("aria-label", label);
+      const openMark = (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        showOverlayDetail(obj);
+      };
+      mark.addEventListener("pointerdown", openMark);
+      mark.addEventListener("click", (event) => event.stopPropagation());
+      mark.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+      });
+      mark.appendChild(
+        svgEl("circle", {
+          cx,
+          cy,
+          r: Math.max(radius, 14),
+          fill: "transparent",
+        })
+      );
+      mark.appendChild(
+        svgEl("circle", {
+          cx,
+          cy,
+          r: radius,
+          fill: "none",
+          stroke: "rgba(0,0,0,0.8)",
+          "stroke-width": 3.5,
+        })
+      );
+      mark.appendChild(
+        svgEl("circle", {
+          class: "sky-ring",
+          cx,
+          cy,
+          r: radius,
+          fill: "none",
+          stroke: "#f6d98a",
+          "stroke-width": 1.35,
+        })
+      );
+      if (label) {
+        const widthGuess = label.length * 8.2 + 8;
+        const half = widthGuess / 2;
+        let lx = cx;
+        if (photoRight - photoLeft > widthGuess + 12) {
+          lx = Math.min(photoRight - 6 - half, Math.max(photoLeft + 6 + half, cx));
+        }
+        let ly = cy - radius - 8;
+        if (ly < 16) ly = cy + radius + 16;
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          const box = { x: lx - half, y: ly - 12, w: widthGuess, h: 16 };
+          const hit = placed.some(
+            (item) =>
+              box.x < item.x + item.w &&
+              box.x + box.w > item.x &&
+              box.y < item.y + item.h &&
+              box.y + box.h > item.y
+          );
+          if (!hit) break;
+          ly += 16;
+        }
+        placed.push({ x: lx - half, y: ly - 12, w: widthGuess, h: 16 });
+        mark.appendChild(
+          svgEl("rect", {
+            x: lx - half,
+            y: ly - 14,
+            width: widthGuess,
+            height: 18,
+            fill: "transparent",
+          })
+        );
+        paintText(mark, lx, ly, label, { "text-anchor": "middle" });
+      }
+      objects.appendChild(mark);
+    });
+    overlay.appendChild(objects);
+
+    const north = tangentToFits(0, 0.01, wcs);
+    const east = tangentToFits(0.01, 0, wcs);
+    const origin = tangentToFits(0, 0, wcs);
+    if (north && east && origin) {
+      const toScreen = (fitsPoint) => {
+        const display = alignDisplay(...fitsToDisplay(fitsPoint[0], fitsPoint[1], wcs, flipY));
+        return displayToFrame(display[0], display[1]);
+      };
+      const center = toScreen(origin);
+      const northPt = toScreen(north);
+      const eastPt = toScreen(east);
+      const normalize = (point, length) => {
+        const dx = point[0] - center[0];
+        const dy = point[1] - center[1];
+        const mag = Math.hypot(dx, dy) || 1;
+        return [(dx / mag) * length, (dy / mag) * length];
+      };
+      const northDir = normalize(northPt, 22);
+      const eastDir = normalize(eastPt, 16);
+      const pivotX = 52;
+      const pivotY = fh - 48;
+      const compass = svgEl("g", { id: "sky-compass" });
+      compass.appendChild(
+        svgEl("circle", {
+          cx: pivotX,
+          cy: pivotY,
+          r: 27,
+          fill: "rgba(8,10,16,0.45)",
+          stroke: "rgba(244,247,255,0.35)",
+          "stroke-width": 1,
+        })
+      );
+      const arrow = (dir, color) =>
+        svgEl("line", {
+          x1: pivotX,
+          y1: pivotY,
+          x2: pivotX + dir[0],
+          y2: pivotY + dir[1],
+          stroke: color,
+          "stroke-width": 1.6,
+          "stroke-linecap": "round",
+        });
+      compass.appendChild(arrow(northDir, "#9eb6ff"));
+      compass.appendChild(arrow(eastDir, "#f4f7ff"));
+      paintText(compass, pivotX + northDir[0] * 1.45, pivotY + northDir[1] * 1.45, "N", {
+        fill: "#d5e2ff",
+        "font-size": 12,
+        "text-anchor": "middle",
+        "dominant-baseline": "middle",
+      });
+      paintText(compass, pivotX + eastDir[0] * 1.7, pivotY + eastDir[1] * 1.7, "E", {
+        fill: "#f4f7ff",
+        "font-size": 11,
+        "text-anchor": "middle",
+        "dominant-baseline": "middle",
+      });
+      overlay.appendChild(compass);
+    }
+
+    if (arcsecPerPx > 0) {
+      const bar = pickScale(arcsecPerPx, Math.min(150, fw * 0.36));
+      const y = fh - 36;
+      const x2 = fw - 28;
+      const x1 = x2 - bar.px;
+      const scaleG = svgEl("g", { id: "sky-scale" });
+      scaleG.appendChild(
+        svgEl("line", {
+          x1,
+          y1: y,
+          x2,
+          y2: y,
+          stroke: "#05070d",
+          "stroke-width": 4,
+          "stroke-linecap": "butt",
+        })
+      );
+      scaleG.appendChild(
+        svgEl("line", {
+          x1,
+          y1: y,
+          x2,
+          y2: y,
+          stroke: "#f4f7ff",
+          "stroke-width": 1.6,
+          "stroke-linecap": "butt",
+        })
+      );
+      [x1, x2].forEach((tick) => {
+        scaleG.appendChild(
+          svgEl("line", {
+            x1: tick,
+            y1: y - 5,
+            x2: tick,
+            y2: y + 5,
+            stroke: "#f4f7ff",
+            "stroke-width": 1.4,
+          })
+        );
+      });
+      paintText(scaleG, (x1 + x2) / 2, y - 10, bar.label, {
+        fill: "#f4f7ff",
+        "font-size": 12,
+        "text-anchor": "middle",
+      });
+      overlay.appendChild(scaleG);
+    }
+  };
+
+  updateSkyOverlay = () => {
+    const wcs = photoWcs(photos[index]);
+    const show = Boolean(overlayOn && wcs && overlayReady);
+    if (overlayBtn) {
+      overlayBtn.hidden = !wcs;
+      overlayBtn.setAttribute("aria-pressed", show ? "true" : "false");
+    }
+    if (!overlay) return;
+    // SVG elements do not honor the hidden property, so toggle the attribute.
+    if (show) overlay.removeAttribute("hidden");
+    else overlay.setAttribute("hidden", "");
+    if (show) {
+      const flipY = overlayFlipFor(photos[index], wcs);
+      ensureOverlayAlign(photos[index], flipY);
+      drawSkyOverlay(wcs, flipY);
+    } else {
+      overlay.replaceChildren();
+      closeOverlayDetail();
+    }
+    placeMoon(wcs);
+  };
+
+  const albumSlug = () => {
+    const match = window.location.pathname.match(/^\/a\/([^/]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  };
+
+  const ensureOverlayAlign = (photo, flipY) => {
+    const slug = albumSlug();
+    if (!slug || !photo || !photo.id) return;
+    const key = `${photo.id}:${photo.v || 0}`;
+    if (key === overlayAlignKey) return;
+    overlayAlignKey = key;
+    const token = ++overlayAlignToken;
+    const release = () => {
+      if (token === overlayAlignToken && overlayAlignKey === key) overlayAlignKey = "";
+    };
+    fetch(`/a/${encodeURIComponent(slug)}/photos/${photo.id}/align?flip=${flipY ? 1 : 0}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (token !== overlayAlignToken) return;
+        if (!data) {
+          release();
+          return;
+        }
+        const sx = Number(data.sx);
+        const sy = Number(data.sy);
+        const tx = Number(data.tx);
+        const ty = Number(data.ty);
+        if (!(sx > 0.5 && sx < 2 && sy > 0.5 && sy < 2) || !Number.isFinite(tx) || !Number.isFinite(ty)) {
+          release();
+          return;
+        }
+        const turn = Number(data.turn);
+        const spin = Number(data.spin);
+        overlayAlign = {
+          sx,
+          sy,
+          tx,
+          ty,
+          turn: turn === 90 || turn === 180 || turn === 270 ? turn : 0,
+          spin: Number.isFinite(spin) ? spin : 0,
+        };
+        // The server tries both row orders and each quarter turn. Its choice
+        // replaces the vote, which runs before the crop is known.
+        if (data.flip === 0 || data.flip === 1) overlayFlipY = data.flip === 1;
+        updateSkyOverlay();
+      })
+      .catch(release);
+  };
+
+  overlayBtn?.addEventListener("click", () => {
+    overlayOn = !overlayOn;
+    updateSkyOverlay();
+  });
+
   const renderPhotoFits = (photo) => {
     const payload = photo ? fitsById[String(photo.id)] : null;
     renderFitsInto(document.getElementById("photo-capture"), payload || null);
 
     const panel = document.getElementById("fits-panel");
     if (!panel || !photo?.id) return;
-    const upload = document.getElementById("fits-upload-form");
-    const clear = document.getElementById("fits-clear-form");
-    if (upload) upload.action = `/admin/photos/${photo.id}/fits`;
-    if (clear) {
-      clear.action = `/admin/photos/${photo.id}/fits/delete`;
-      clear.hidden = !payload;
-    }
-    const name = document.getElementById("fits-photo-name");
-    if (name) name.textContent = photo.name || "this photo";
-    const err = document.getElementById("fits-error");
-    if (err) {
-      err.hidden = !fitsErrorPinned;
-      fitsErrorPinned = false;
-    }
+    const assign = document.getElementById("session-assign-form");
+    if (assign) assign.action = `/admin/photos/${photo.id}/session`;
+    const sessionSelect = document.getElementById("session-assign");
+    if (sessionSelect) sessionSelect.value = photo.session ? String(photo.session) : "";
     renderFitsInto(document.getElementById("fits-preview"), payload || null);
   };
 
@@ -677,6 +1593,12 @@
   const select = (i) => {
     index = (i + photos.length) % photos.length;
     const photo = photos[index];
+    overlayReady = false;
+    overlayAlign = null;
+    overlayAlignKey = "";
+    overlayAlignToken += 1;
+    closeOverlayDetail();
+    moonAnchor = null;
     scale = 1;
     tx = 0;
     ty = 0;
@@ -703,18 +1625,20 @@
 
     const nextSrc = mediaUrl(photo, false);
     const current = img.getAttribute("src");
-    if (current === nextSrc && img.complete && img.naturalWidth) {
+    const revealLoaded = () => {
+      if (!img.naturalWidth) return;
       naturalW = img.naturalWidth;
       naturalH = img.naturalHeight;
-      fitImage(true);
-      return;
-    }
-    img.onload = () => {
-      naturalW = img.naturalWidth;
-      naturalH = img.naturalHeight;
+      overlayReady = true;
       fitImage(true);
     };
+    img.onload = revealLoaded;
+    if (current === nextSrc && img.complete && img.naturalWidth) {
+      revealLoaded();
+      return;
+    }
     img.src = nextSrc;
+    if (img.complete && img.naturalWidth) revealLoaded();
   };
 
   // Load initial photo (hash or first) with its saved zoom/pan
@@ -779,12 +1703,17 @@
     const thumbImg = thumbs[index]?.querySelector("img");
     if (thumbImg) thumbImg.src = thumbSrc;
 
-    img.onload = () => {
+    overlayReady = false;
+    const revealLoaded = () => {
+      if (!img.naturalWidth) return;
       naturalW = img.naturalWidth;
       naturalH = img.naturalHeight;
+      overlayReady = true;
       fitImage(true);
     };
+    img.onload = revealLoaded;
     img.src = mainSrc;
+    if (img.complete && img.naturalWidth) revealLoaded();
   };
 
   if (isAdmin && saveBtn) {
@@ -881,15 +1810,6 @@
     document.getElementById("rotate-left")?.addEventListener("click", () => rotatePhoto("left"));
     document.getElementById("rotate-right")?.addEventListener("click", () => rotatePhoto("right"));
   }
-  frame.addEventListener(
-    "wheel",
-    (e) => {
-      e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-      setZoom(scale * factor, e.clientX, e.clientY);
-    },
-    { passive: false }
-  );
 
   frame.addEventListener("dblclick", (e) => {
     if (scale > 1.05) setZoom(1);
@@ -898,6 +1818,10 @@
 
   frame.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
+    if (overlayDetailKey) {
+      closeOverlayDetail();
+      updateSkyOverlay();
+    }
     dragging = true;
     lastX = e.clientX;
     lastY = e.clientY;

@@ -14,6 +14,9 @@
            src="/media/{{ album.slug }}/{{ photos[0].filename }}?v={{ (photos[0].file_version or 0)|int }}"
            alt="{{ photos[0].original_name }}"
            draggable="false" />
+      <svg id="sky-overlay" class="sky-overlay" hidden aria-hidden="true"></svg>
+      <img id="moon-overlay" class="moon-overlay" src="/static/img/moon.png?v=1" alt="Full Moon" title="Full Moon at its real angular size. Drag to compare." hidden draggable="false" />
+      <div id="overlay-detail" class="overlay-detail" hidden></div>
     </div>
     <button type="button" class="viewer-nav viewer-next" id="viewer-next" aria-label="Next">›</button>
 
@@ -22,6 +25,8 @@
       <button type="button" class="btn tiny" id="zoom-reset" aria-label="Reset zoom">100%</button>
       <button type="button" class="btn tiny" id="zoom-in" aria-label="Zoom in">+</button>
       <button type="button" class="btn tiny" id="view-1to1" title="Open full image at 1:1 (actual pixels)">1:1</button>
+      <button type="button" class="btn tiny" id="overlay-toggle" aria-pressed="false" hidden
+              title="Show compass, scale, deep-sky objects, and a full Moon you can drag. Click a mark to copy its name and catalog id. A cropped or rotated photo can still shift the marks.">Overlay</button>
       {% if is_admin %}
       <button type="button" class="btn tiny" id="rotate-left" title="Rotate 90° left (saved to disk)">⟲</button>
       <button type="button" class="btn tiny" id="rotate-right" title="Rotate 90° right (saved to disk)">⟳</button>
@@ -59,25 +64,30 @@
 
   <aside class="album-side">
     <h1 class="album-side-title">{{ album.title }}</h1>
-    {% if album.description %}
-    <div class="album-side-desc md-body">{{ album.description | markdown | safe }}</div>
-    {% endif %}
-    <p class="muted album-side-count">{{ photos|length }} photo{% if photos|length != 1 %}s{% endif %}</p>
-    <div id="photo-capture" class="photo-capture" hidden>
-      <h2 class="photo-capture-title">This frame</h2>
-      <p class="muted photo-capture-file" data-fits-file></p>
-      <div data-fits-summary></div>
-      <details class="photo-capture-full" data-fits-full>
-        <summary>Full header</summary>
-        <div class="fits-cards" data-fits-cards></div>
-      </details>
+    <div class="album-side-split">
+      <div class="album-side-main">
+        {% if album.description %}
+        <div class="album-side-desc md-body">{{ album.description | markdown | safe }}</div>
+        {% endif %}
+        <p class="muted album-side-count">{{ photos|length }} photo{% if photos|length != 1 %}s{% endif %}</p>
+        {% if is_admin %}
+        <p class="muted reorder-status" id="photo-reorder-status">Drag a grip. The highlighted gap is where the photo will land.</p>
+        <p><a class="btn tiny" href="/admin/albums/{{ album.id }}">Edit album</a></p>
+        {% endif %}
+        <p><a class="btn tiny ghost" href="/planner">Plan a session</a></p>
+      </div>
+      <div id="photo-capture" class="photo-capture" hidden>
+        <h2 class="photo-capture-title" data-session-title>Session</h2>
+        <p class="muted photo-capture-file" data-fits-file></p>
+        <div data-solve></div>
+        <div data-fits-summary></div>
+        <details class="photo-capture-full" data-fits-full>
+          <summary>Full header</summary>
+          <div class="fits-cards" data-fits-cards></div>
+        </details>
+      </div>
     </div>
     <script type="application/json" id="photo-fits-data">{{ photo_fits | tojson }}</script>
-    {% if is_admin %}
-    <p class="muted reorder-status" id="photo-reorder-status">Drag a grip. The highlighted gap is where the photo will land.</p>
-    <p><a class="btn tiny" href="/admin/albums/{{ album.id }}">Edit album</a></p>
-    {% endif %}
-    <p><a class="btn tiny ghost" href="/planner">Plan a session</a></p>
   </aside>
 </section>
 
@@ -112,5 +122,13 @@
 <section class="empty-state">
   <p>This album has no photos yet.</p>
 </section>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+{% if photos %}
+<script src="/static/js/catalog.js?v=1"></script>
+<script src="/static/js/overlay-catalog.js?v=3"></script>
+<script src="/static/js/star-catalog.js?v=1"></script>
+<script src="/static/js/overlay-flip.js?v=1"></script>
 {% endif %}
 {% endblock %}

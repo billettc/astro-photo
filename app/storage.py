@@ -12,6 +12,7 @@ from app.config import (
     COVER_WIDTH,
     FULL_JPEG_QUALITY,
     FULL_SIZE,
+    SOLVE_DIR,
     THUMB_DIR,
     THUMB_SIZE,
     UPLOAD_DIR,
@@ -22,6 +23,7 @@ def ensure_dirs() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     THUMB_DIR.mkdir(parents=True, exist_ok=True)
     COVER_DIR.mkdir(parents=True, exist_ok=True)
+    SOLVE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def is_allowed_filename(name: str) -> bool:
