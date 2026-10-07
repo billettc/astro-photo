@@ -24,7 +24,7 @@ from app.align import ALIGN_REV
 from app.capture import adopt_legacy_fits, finish_solve, solve_file_for, solve_payload
 from app.database import ImagingSession, Photo, SessionLocal
 from app.fits import PlateSolution, SolveError, pack_header
-from app.main import app
+from app.main import _align_failed, _align_refreshing, app
 from tests.test_fits import fits_bytes, sample_header, solved_header
 
 
@@ -93,6 +93,29 @@ class SessionUploadTests(unittest.TestCase):
         cls.photo_id = uploaded.text[start:].split("/", 1)[0]
 
     def test_overlay_align_is_remembered_for_the_row_order(self):
+        _align_failed.clear()
+        _align_refreshing.clear()
+        db = SessionLocal()
+        photo = db.get(Photo, int(self.photo_id))
+        slug = photo.album.slug
+        db.close()
+
+        # Nothing is stored yet. The page hears that a measurement is running
+        # and draws nothing until the next read.
+        with patch(
+            "app.main.frame_align_for_photo",
+            return_value={"sx": 1.05, "sy": 1.05, "tx": 2.0, "ty": -3.0, "flip": 0, "turn": 0},
+        ) as first:
+            pending = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0")
+        self.assertEqual(pending.status_code, 200)
+        self.assertEqual(pending.json(), {"status": "pending"})
+        self.assertEqual(first.call_count, 1)
+        ready = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0")
+        self.assertEqual(ready.json()["status"], "ready")
+        self.assertAlmostEqual(ready.json()["sx"], 1.05)
+        self.assertEqual(ready.json()["flip"], 0)
+        self.assertEqual(first.call_count, 1)
+
         db = SessionLocal()
         photo = db.get(Photo, int(self.photo_id))
         photo.align_sx = 1.17
@@ -102,13 +125,13 @@ class SessionUploadTests(unittest.TestCase):
         photo.align_flip = 0
         photo.align_version = photo.file_version or 0
         photo.align_rev = ALIGN_REV
-        slug = photo.album.slug
         db.commit()
         db.close()
 
         cached = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0")
         self.assertEqual(cached.status_code, 200)
         body = cached.json()
+        self.assertEqual(body["status"], "ready")
         self.assertAlmostEqual(body["sx"], 1.17)
         self.assertAlmostEqual(body["sy"], 1.23)
         self.assertAlmostEqual(body["tx"], -70)
@@ -122,6 +145,7 @@ class SessionUploadTests(unittest.TestCase):
         # One stored answer covers either requested row order.
         other = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=1")
         self.assertEqual(other.status_code, 200)
+        self.assertEqual(other.json()["status"], "ready")
         self.assertEqual(other.json()["flip"], 0)
         self.assertAlmostEqual(other.json()["sx"], 1.17)
 
@@ -130,16 +154,22 @@ class SessionUploadTests(unittest.TestCase):
         photo.align_rev = 0
         db.commit()
         db.close()
-        # The catalog is down. The saved correction is still the one to draw.
+        # The catalog is down. The page waits, then the last crop is the fallback.
         with patch(
             "app.main.frame_align_for_photo",
             side_effect=HTTPException(503, "The star catalog could not be reached."),
         ) as blocked:
-            kept = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0")
-        self.assertEqual(kept.status_code, 200)
+            waiting = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0")
+        self.assertEqual(waiting.status_code, 200)
+        self.assertEqual(waiting.json(), {"status": "pending"})
         self.assertEqual(blocked.call_count, 1)
+        kept = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0")
+        self.assertEqual(kept.status_code, 200)
+        self.assertEqual(kept.json()["status"], "failed")
+        self.assertIn("star catalog", kept.json()["detail"])
         self.assertAlmostEqual(kept.json()["sx"], 1.17)
         self.assertEqual(kept.json()["flip"], 0)
+        self.assertEqual(blocked.call_count, 1)
         db = SessionLocal()
         self.assertEqual(db.get(Photo, int(self.photo_id)).align_rev, 0)
         db.close()
@@ -148,13 +178,12 @@ class SessionUploadTests(unittest.TestCase):
             "app.main.frame_align_for_photo",
             return_value={"sx": 1.0, "sy": 1.0, "tx": 0.0, "ty": 0.0, "flip": 1, "turn": 90},
         ) as measured:
-            fresh = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0")
+            fresh = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=0&retry=1")
         self.assertEqual(fresh.status_code, 200)
+        self.assertEqual(fresh.json(), {"status": "pending"})
         self.assertEqual(measured.call_count, 1)
-        # This answer is the saved correction. The new search lands after it.
-        self.assertAlmostEqual(fresh.json()["sx"], 1.17)
-        self.assertEqual(fresh.json()["flip"], 0)
         again = self.client.get(f"/a/{slug}/photos/{self.photo_id}/align?flip=1")
+        self.assertEqual(again.json()["status"], "ready")
         self.assertEqual(again.json()["flip"], 1)
         self.assertEqual(again.json()["ty"], 0.0)
         self.assertEqual(again.json()["turn"], 90)
@@ -287,6 +316,7 @@ class SessionUploadTests(unittest.TestCase):
         self.assertEqual(wcs["width"], 100)
         self.assertEqual(wcs["height"], 80)
         self.assertIn('id="overlay-toggle"', album.text)
+        self.assertIn('id="overlay-status"', album.text)
         self.assertIn('aria-pressed="false"', album.text)
         self.assertIn('id="sky-overlay"', album.text)
         self.assertIn("catalog.js", album.text)

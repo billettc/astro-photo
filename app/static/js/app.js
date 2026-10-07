@@ -468,6 +468,14 @@
   let overlayAlign = null;
   let overlayAlignKey = "";
   let overlayAlignToken = 0;
+  // "" until a measurement is asked for, then pending, ready, or failed.
+  let overlayAlignState = "";
+  let overlayAlignNote = "";
+  let overlayAlignSlow = false;
+  let overlayAlignFallback = false;
+  let overlayAlignActive = false;
+  let overlayAlignTimer = 0;
+  let overlayAlignHint = 0;
   let updateSkyOverlay = () => {};
 
   const MIN_ZOOM = 1;
@@ -696,6 +704,7 @@
   // Sky marks. The projection matches app/fits.py sky_to_fits_pixel and fits_to_display.
   const SVG_NS = "http://www.w3.org/2000/svg";
   const overlayBtn = document.getElementById("overlay-toggle");
+  const overlayStatus = document.getElementById("overlay-status");
   const overlay = document.getElementById("sky-overlay");
   const overlayDetail = document.getElementById("overlay-detail");
   const moonEl = document.getElementById("moon-overlay");
@@ -1022,7 +1031,9 @@
   const placeMoon = (wcs) => {
     if (!moonEl) return;
     const arcsec = overlayArcsecPerPx(wcs);
-    const show = Boolean(overlayOn && wcs && overlayReady && arcsec);
+    const show = Boolean(
+      overlayOn && wcs && overlayReady && arcsec && overlayAlignState === "ready" && overlayAlign
+    );
     if (!show || !frame.clientWidth || !frame.clientHeight) {
       moonEl.hidden = true;
       return;
@@ -1463,22 +1474,52 @@
     }
   };
 
+  const stopAlignWait = () => {
+    if (overlayAlignTimer) clearTimeout(overlayAlignTimer);
+    overlayAlignTimer = 0;
+    if (overlayAlignHint) clearTimeout(overlayAlignHint);
+    overlayAlignHint = 0;
+    overlayAlignActive = false;
+  };
+
+  const resetOverlayAlign = () => {
+    stopAlignWait();
+    overlayAlign = null;
+    overlayAlignKey = "";
+    overlayAlignState = "";
+    overlayAlignNote = "";
+    overlayAlignSlow = false;
+    overlayAlignFallback = false;
+    overlayAlignToken += 1;
+  };
+
   updateSkyOverlay = () => {
     const wcs = photoWcs(photos[index]);
-    const show = Boolean(overlayOn && wcs && overlayReady);
+    const canAsk = Boolean(overlayOn && wcs && overlayReady);
+    let flipY = overlayFlipY;
+    if (canAsk) {
+      flipY = overlayFlipFor(photos[index], wcs);
+      ensureOverlayAlign(photos[index], flipY);
+    }
+    const waiting = canAsk && overlayAlignState === "pending";
+    const show = Boolean(canAsk && overlayAlignState === "ready" && overlayAlign);
     if (overlayBtn) {
       overlayBtn.hidden = !wcs;
-      overlayBtn.setAttribute("aria-pressed", show ? "true" : "false");
+      overlayBtn.setAttribute("aria-pressed", overlayOn && wcs ? "true" : "false");
+      if (waiting) overlayBtn.setAttribute("aria-busy", "true");
+      else overlayBtn.removeAttribute("aria-busy");
+    }
+    if (overlayStatus) {
+      if (!overlayOn) overlayStatus.textContent = "";
+      else if (waiting && overlayAlignSlow) overlayStatus.textContent = "Measuring the sky…";
+      else overlayStatus.textContent = overlayAlignNote || "";
     }
     if (!overlay) return;
     // SVG elements do not honor the hidden property, so toggle the attribute.
     if (show) overlay.removeAttribute("hidden");
     else overlay.setAttribute("hidden", "");
-    if (show) {
-      const flipY = overlayFlipFor(photos[index], wcs);
-      ensureOverlayAlign(photos[index], flipY);
-      drawSkyOverlay(wcs, flipY);
-    } else {
+    if (show) drawSkyOverlay(wcs, flipY);
+    else {
       overlay.replaceChildren();
       closeOverlayDetail();
     }
@@ -1490,52 +1531,121 @@
     return match ? decodeURIComponent(match[1]) : "";
   };
 
+  const alignFromPayload = (data) => {
+    if (!data) return null;
+    const sx = Number(data.sx);
+    const sy = Number(data.sy);
+    const tx = Number(data.tx);
+    const ty = Number(data.ty);
+    if (!(sx > 0.5 && sx < 2 && sy > 0.5 && sy < 2) || !Number.isFinite(tx) || !Number.isFinite(ty)) {
+      return null;
+    }
+    const turn = Number(data.turn);
+    const spin = Number(data.spin);
+    return {
+      sx,
+      sy,
+      tx,
+      ty,
+      turn: turn === 90 || turn === 180 || turn === 270 ? turn : 0,
+      spin: Number.isFinite(spin) ? spin : 0,
+    };
+  };
+
   const ensureOverlayAlign = (photo, flipY) => {
     const slug = albumSlug();
     if (!slug || !photo || !photo.id) return;
     const key = `${photo.id}:${photo.v || 0}`;
-    if (key === overlayAlignKey) return;
+    if (key === overlayAlignKey && overlayAlignState === "ready") return;
+    if (key === overlayAlignKey && overlayAlignState === "pending" && overlayAlignActive) return;
+    if (key === overlayAlignKey && overlayAlignState === "failed") return;
+    const restart = key === overlayAlignKey && overlayAlignState === "pending";
     overlayAlignKey = key;
+    if (!restart) {
+      overlayAlign = null;
+      overlayAlignNote = "";
+      overlayAlignSlow = false;
+      overlayAlignFallback = false;
+    }
+    overlayAlignState = "pending";
+    overlayAlignActive = true;
     const token = ++overlayAlignToken;
-    const release = () => {
-      if (token === overlayAlignToken && overlayAlignKey === key) overlayAlignKey = "";
-    };
-    fetch(`/a/${encodeURIComponent(slug)}/photos/${photo.id}/align?flip=${flipY ? 1 : 0}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (token !== overlayAlignToken) return;
-        if (!data) {
-          release();
-          return;
-        }
-        const sx = Number(data.sx);
-        const sy = Number(data.sy);
-        const tx = Number(data.tx);
-        const ty = Number(data.ty);
-        if (!(sx > 0.5 && sx < 2 && sy > 0.5 && sy < 2) || !Number.isFinite(tx) || !Number.isFinite(ty)) {
-          release();
-          return;
-        }
-        const turn = Number(data.turn);
-        const spin = Number(data.spin);
-        overlayAlign = {
-          sx,
-          sy,
-          tx,
-          ty,
-          turn: turn === 90 || turn === 180 || turn === 270 ? turn : 0,
-          spin: Number.isFinite(spin) ? spin : 0,
-        };
-        // The server tries both row orders and each quarter turn. Its choice
-        // replaces the vote, which runs before the crop is known.
-        if (data.flip === 0 || data.flip === 1) overlayFlipY = data.flip === 1;
+    const armHint = () => {
+      if (overlayAlignSlow || overlayAlignHint) return;
+      overlayAlignHint = setTimeout(() => {
+        overlayAlignHint = 0;
+        if (token !== overlayAlignToken || overlayAlignState !== "pending" || !overlayOn) return;
+        overlayAlignSlow = true;
         updateSkyOverlay();
-      })
-      .catch(release);
+      }, 300);
+    };
+    const pull = (retry) => {
+      const query = retry ? "&retry=1" : "";
+      fetch(`/a/${encodeURIComponent(slug)}/photos/${photo.id}/align?flip=${flipY ? 1 : 0}${query}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (token !== overlayAlignToken || overlayAlignKey !== key) return;
+          if (!data) {
+            stopAlignWait();
+            overlayAlign = null;
+            overlayAlignState = "failed";
+            overlayAlignFallback = false;
+            overlayAlignNote = "The sky measurement failed.";
+            updateSkyOverlay();
+            return;
+          }
+          if (!overlayOn && data.status === "pending") return;
+          if (data.status === "pending") {
+            overlayAlignState = "pending";
+            overlayAlign = null;
+            armHint();
+            overlayAlignTimer = setTimeout(() => pull(false), 2000);
+            updateSkyOverlay();
+            return;
+          }
+          stopAlignWait();
+          const align = alignFromPayload(data);
+          if (data.status === "failed" || !align) {
+            if (align) {
+              overlayAlign = align;
+              overlayAlignState = "ready";
+              overlayAlignFallback = true;
+              overlayAlignNote = data.detail || "Showing the last sky measurement.";
+            } else {
+              overlayAlign = null;
+              overlayAlignState = "failed";
+              overlayAlignFallback = false;
+              overlayAlignNote = (data && data.detail) || "The sky measurement failed.";
+            }
+          } else {
+            overlayAlign = align;
+            overlayAlignState = "ready";
+            overlayAlignFallback = false;
+            overlayAlignNote = "";
+          }
+          // The server tries both row orders and each quarter turn. Its choice
+          // replaces the vote, which runs before the crop is known.
+          if (align && (data.flip === 0 || data.flip === 1)) overlayFlipY = data.flip === 1;
+          updateSkyOverlay();
+        })
+        .catch(() => {
+          if (token !== overlayAlignToken || overlayAlignKey !== key) return;
+          stopAlignWait();
+          overlayAlign = null;
+          overlayAlignState = "failed";
+          overlayAlignFallback = false;
+          overlayAlignNote = "The sky measurement failed.";
+          updateSkyOverlay();
+        });
+    };
+    armHint();
+    pull(!restart);
   };
 
   overlayBtn?.addEventListener("click", () => {
     overlayOn = !overlayOn;
+    if (!overlayOn) stopAlignWait();
+    else if (overlayAlignState === "failed" || overlayAlignFallback) overlayAlignKey = "";
     updateSkyOverlay();
   });
 
@@ -1594,9 +1704,7 @@
     index = (i + photos.length) % photos.length;
     const photo = photos[index];
     overlayReady = false;
-    overlayAlign = null;
-    overlayAlignKey = "";
-    overlayAlignToken += 1;
+    resetOverlayAlign();
     closeOverlayDetail();
     moonAnchor = null;
     scale = 1;
@@ -1704,6 +1812,7 @@
     if (thumbImg) thumbImg.src = thumbSrc;
 
     overlayReady = false;
+    resetOverlayAlign();
     const revealLoaded = () => {
       if (!img.naturalWidth) return;
       naturalW = img.naturalWidth;

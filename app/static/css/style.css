@@ -1759,6 +1759,10 @@ body.pixel-dialog-open {
   min-width: 5rem;
 }
 
+#overlay-status {
+  font-size: 0.8rem;
+}
+
 .thumb-strip {
   display: flex;
   gap: 0.55rem;

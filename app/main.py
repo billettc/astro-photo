@@ -56,8 +56,10 @@ from app.config import (
 from app.align import ALIGN_REV, IDENTITY, QUARTER_TURNS, frame_ratio, pick_align, project_stars
 
 log = logging.getLogger(__name__)
-# One refresh at a time per photo. A catalog outage must not pile up.
+# One measurement at a time per photo. A catalog outage must not pile up.
 _align_refreshing: set[int] = set()
+# Finished attempts that did not store a new crop. The viewer stops waiting.
+_align_failed: dict[int, str] = {}
 from app.fits import FitsError, Pointing, SolveError, is_fits_filename, load_fits_header, pack_header
 from app.database import (
     DEFAULT_DESCRIPTION_PROMPT,
@@ -264,27 +266,44 @@ def _cached_align(photo: Photo) -> dict | None:
     return _stored_align(photo)
 
 
+def _align_fail_text(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    return "The sky measurement failed."
+
+
 def _refresh_align(photo_id: int) -> None:
-    """Replace an older crop correction once the catalog can be reached."""
-    if photo_id in _align_refreshing:
-        return
-    _align_refreshing.add(photo_id)
+    """Measure the crop. The viewer draws only after this attempt finishes."""
     db = SessionLocal()
     try:
         photo = db.get(Photo, photo_id)
         if photo is None or _cached_align(photo) is not None:
+            _align_failed.pop(photo_id, None)
             return
         payload = frame_align_for_photo(photo)
         _store_align(photo, bool(payload.get("flip")), payload)
         db.commit()
+        _align_failed.pop(photo_id, None)
     except HTTPException as exc:
         log.warning("align refresh skipped for photo %s: %s", photo_id, exc.detail)
+        _align_failed[photo_id] = _align_fail_text(exc)
+        db.rollback()
     except Exception:
         log.exception("align refresh failed for photo %s", photo_id)
+        _align_failed[photo_id] = "The sky measurement failed."
         db.rollback()
     finally:
         db.close()
         _align_refreshing.discard(photo_id)
+
+
+def _queue_align_refresh(background: BackgroundTasks, photo_id: int) -> None:
+    if photo_id in _align_refreshing:
+        return
+    _align_failed.pop(photo_id, None)
+    _align_refreshing.add(photo_id)
+    background.add_task(_refresh_align, photo_id)
 
 
 def _store_align(photo: Photo, flip: bool, payload: dict) -> None:
@@ -370,6 +389,7 @@ def photo_align(
     request: Request,
     background: BackgroundTasks,
     flip: int = 0,
+    retry: int = 0,
     db: Session = Depends(get_db),
 ):
     album = db.query(Album).filter(Album.slug == slug).first()
@@ -388,17 +408,22 @@ def photo_align(
     del flip
     cached = _cached_align(photo)
     if cached is not None:
+        _align_failed.pop(photo.id, None)
+        cached["status"] = "ready"
         return cached
-    # A newer search can wait. Dropping the saved correction draws the marks
-    # on the full frame, which is how Bubble and the M51 recomposition moved.
-    stored = _stored_align(photo)
-    if stored is not None:
-        background.add_task(_refresh_align, photo.id)
-        return stored
-    payload = frame_align_for_photo(photo)
-    _store_align(photo, bool(payload.get("flip")), payload)
-    db.commit()
-    return payload
+    # A measurement is still running. The page waits and draws nothing yet.
+    if photo.id in _align_refreshing:
+        return {"status": "pending"}
+    # The attempt finished without a new crop. The last saved one can be drawn.
+    failed = _align_failed.get(photo.id)
+    if failed and not retry:
+        body = {"status": "failed", "detail": failed}
+        stored = _stored_align(photo)
+        if stored:
+            body.update(stored)
+        return body
+    _queue_align_refresh(background, photo.id)
+    return {"status": "pending"}
 
 
 @app.post("/a/{slug}/unlock")

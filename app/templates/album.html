@@ -27,6 +27,7 @@
       <button type="button" class="btn tiny" id="view-1to1" title="Open full image at 1:1 (actual pixels)">1:1</button>
       <button type="button" class="btn tiny" id="overlay-toggle" aria-pressed="false" hidden
               title="Show compass, scale, deep-sky objects, and a full Moon you can drag. Click a mark to copy its name and catalog id. A cropped or rotated photo can still shift the marks.">Overlay</button>
+      <span class="muted" id="overlay-status" aria-live="polite"></span>
       {% if is_admin %}
       <button type="button" class="btn tiny" id="rotate-left" title="Rotate 90° left (saved to disk)">⟲</button>
       <button type="button" class="btn tiny" id="rotate-right" title="Rotate 90° right (saved to disk)">⟳</button>
